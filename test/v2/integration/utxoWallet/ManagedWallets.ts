@@ -1,5 +1,5 @@
 import * as _ from 'lodash';
-import Bluebird from 'bluebird';
+import * as Bluebird from 'bluebird';
 import * as assert from 'assert';
 
 import * as nock from 'nock';

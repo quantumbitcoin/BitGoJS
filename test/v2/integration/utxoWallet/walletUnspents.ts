@@ -4,14 +4,14 @@
 
 require('should');
 
-const Bluebird = require('bluebird');
+import * as Bluebird from 'bluebird';
 
 const { ManagedWallets } = require('./ManagedWallets');
 
 
 const wait = async (seconds) => {
   console.log(`waiting ${seconds} seconds...`);
-  await Promise.delay(seconds * 1000);
+  await Bluebird.delay(seconds * 1000);
   console.log(`done`);
 };
 
