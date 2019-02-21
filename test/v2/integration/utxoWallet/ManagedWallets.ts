@@ -79,7 +79,9 @@ class ManagedWallets {
     this.faucet = await this.getOrCreateWallet(allWallets, 'managed-faucet');
 
     const wallets = await Promise.all(
-      [...Array(poolSize)].map((v, i) => this.getOrCreateWallet(allWallets, `managed-${i}`))
+      Array(poolSize)
+        .fill(null)
+        .map((v, i) => this.getOrCreateWallet(allWallets, `managed-${i}`))
     );
 
     await this.manageWalletBalances(wallets, { minBalanceSat });
