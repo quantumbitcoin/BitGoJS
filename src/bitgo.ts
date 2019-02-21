@@ -35,6 +35,7 @@ import querystring = require('querystring');
 import config = require('./config');
 import crypto = require('crypto');
 import debugLib = require('debug');
+import { isRequestSourceError, tryVerifyRequestSource } from './v2/requestSourceVerification';
 const internal = require('./v2/internal');
 
 const debug = debugLib('bitgo:index');
@@ -896,6 +897,19 @@ BitGo.prototype.authenticateWithAccessToken = function(params, callback) {
   this._token = params.accessToken;
 };
 
+
+/**
+ * Verify request source using userId and nonce.
+ * Use @utils.decodeVerifySourceUrl to obtain values from the email link.
+ * @param userId
+ * @param nonce
+ */
+BitGo.prototype.verifyRequestSource = async function (userId: string, nonce: string) {
+  return this
+    .get(this.url('/user/verifysource'))
+    .query({ userId, nonce });
+};
+
 /**
  *
  * @param responseBody Response body object
@@ -1100,38 +1114,50 @@ BitGo.prototype.authenticate = function(params, callback) {
     // tell the server that the client was forced to downgrade the authentication protocol
     authParams.forceV1Auth = true;
   }
-  return request.send(authParams)
-  .then(function(response) {
-    // extract body and user information
-    const body = response.body;
-    self._user = body.user;
+  return request
+    .send(authParams)
+    .then(function(response) {
+      // extract body and user information
+      const body = response.body;
+      self._user = body.user;
 
-    if (body.access_token) {
-      self._token = body.access_token;
-      // if the downgrade was forced, adding a warning message might be prudent
-    } else {
-      // check the presence of an encrypted ECDH xprv
-      // if not present, legacy account
-      const encryptedXprv = body.encryptedECDHXprv;
-      if (!encryptedXprv) {
-        throw new Error('Keychain needs encryptedXprv property');
+      if (body.access_token) {
+        self._token = body.access_token;
+        // if the downgrade was forced, adding a warning message might be prudent
+      } else {
+        // check the presence of an encrypted ECDH xprv
+        // if not present, legacy account
+        const encryptedXprv = body.encryptedECDHXprv;
+        if (!encryptedXprv) {
+          throw new Error('Keychain needs encryptedXprv property');
+        }
+
+        const responseDetails = self.handleTokenIssuance(response.body, password);
+        self._token = responseDetails.token;
+        self._ecdhXprv = responseDetails.ecdhXprv;
+
+        // verify the response's authenticity
+        request.verifyResponse(response);
+
+        // add the remaining component for easier access
+        response.body.access_token = self._token;
       }
 
-      const responseDetails = self.handleTokenIssuance(response.body, password);
-      self._token = responseDetails.token;
-      self._ecdhXprv = responseDetails.ecdhXprv;
-
-      // verify the response's authenticity
-      request.verifyResponse(response);
-
-      // add the remaining component for easier access
-      response.body.access_token = self._token;
-    }
-
-    return response;
-  })
-  .then(handleResponseResult(), handleResponseError)
-  .nodeify(callback);
+      return response;
+    })
+    .then(handleResponseResult(), async err => {
+      if (isRequestSourceError(err)) {
+        const { verifyRequestSource = true } = params;
+        if (verifyRequestSource) {
+          if (await tryVerifyRequestSource(this, err)) {
+            return this.authenticate({ ...params, verifyRequestSource: false }, callback);
+          }
+        }
+        console.error(`failed to verify request source, not retrying.`);
+      }
+      return handleResponseError(err);
+    })
+    .nodeify(callback);
 };
 
 /**
