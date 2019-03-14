@@ -24,10 +24,10 @@ const walletPassphrase = ManagedWallets.getPassphrase();
 const runTests = (groupName: string, walletConfig: IWalletConfig) => {
   let testWallets: ManagedWallets;
 
-  describe(`Wallets [${groupName}]`, function () {
+  const env = process.env.BITGO_ENV || 'test';
+  describe(`Wallets env=${env} group=${groupName}]`, function () {
     before(async function () {
       this.timeout(120_000);
-      const env = process.env.BITGO_ENV || 'test';
       testWallets = await ManagedWallets.create(
         env,
         'otto+e2e-utxowallets@bitgo.com',
@@ -129,6 +129,6 @@ describe('Unspent Manipulation', function() {
   });
 
   runTests(`pure-p2sh`, makeConfig([Codes.p2sh]));
-  // runTests(`pure-p2shP2wsh`, makeConfig([Codes.p2shP2wsh]));
+  runTests(`pure-p2shP2wsh`, makeConfig([Codes.p2shP2wsh]));
   // runTests(`pure-p2wsh`, makeConfig([Codes.p2wsh]));
 });

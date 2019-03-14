@@ -11,6 +11,7 @@ import debugLib from 'debug';
 const debug = debugLib('ManagedWallets');
 
 import * as BitGo from '../../../../src/bitgo';
+import {min} from "moment";
 
 export type BitGoWallet = any;
 
@@ -336,7 +337,7 @@ export class ManagedWallets {
   }
 
   private isConfirmed(u: IUnspent, minConfirms = 3) {
-    return u.blockHeight + minConfirms > this.chainhead;
+    return (this.chainhead - u.blockHeight) >= minConfirms
   }
 
   private isReady(w: BitGoWallet, unspents: IUnspent[]): boolean {
@@ -443,7 +444,7 @@ export class ManagedWallets {
       wallets.forEach((w) => {
         const unspents = unspentMap.get(w);
         debug(`wallet ${w.label()}`);
-        debug(` unspents`, unspents.map((u) => [u.chain, u.value]));
+        debug(` unspents`, unspents.map((u) => [u.chain, u.value, 'confirmed='+this.isConfirmed(u)]));
         debug(` balance`, sumUnspents(unspents));
         debug(` needsReset`, this.needsReset(w, unspents));
         debug(` canSelfReset`, canSelfReset(w));
