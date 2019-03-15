@@ -92,7 +92,7 @@ const runTests = (groupName: string, walletConfig: IWalletConfig) => {
       (await targetWallet.unspents()).unspents.length.should.eql(targetWalletUnspents.length + 1);
     });
 
-    it.only('should make tx with bnb exactMatch', async function () {
+    it('should make tx with bnb exactMatch', async function () {
       this.timeout(60_000);
       const wallet = await testWallets.getNextWallet();
       const unspents = await testWallets.getUnspents(wallet);
@@ -114,6 +114,7 @@ const runTests = (groupName: string, walletConfig: IWalletConfig) => {
         walletPassphrase
       });
       // FIXME: how do we know BnB was used?
+      // At least we have sent strategyAllowFallback=false
 
       // FIXME: vsize mismatch due to mismatched unspents lib
       // prebuild.feeInfo.size.should.eql(dims.getVSize());
