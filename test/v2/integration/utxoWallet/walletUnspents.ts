@@ -107,7 +107,11 @@ const runTests = (groupName: string, walletConfig: IWalletConfig) => {
       const amount = sumUnspents(unspents) - txCost;
       debug({ dims, txCost, amount });
       const prebuild = await wallet.prebuildTransaction({
-        recipients: [{ address, amount }], feeRate, walletPassphrase
+        recipients: [{ address, amount }],
+        strategy: 'BNB',
+        strategyAllowFallback: false,
+        feeRate,
+        walletPassphrase
       });
       // FIXME: how do we know BnB was used?
 
