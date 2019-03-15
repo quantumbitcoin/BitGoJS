@@ -21,11 +21,21 @@ const wait = async (seconds) => {
 
 const walletPassphrase = ManagedWallets.getPassphrase();
 
+const skipTest = (groupName) => {
+  const groups = process.env.BITGOJS_INTTEST_GROUPS;
+  return (groups === undefined) || !groups.split(',').includes(groupName);
+};
+
 const runTests = (groupName: string, walletConfig: IWalletConfig) => {
   let testWallets: ManagedWallets;
 
   const env = process.env.BITGO_ENV || 'test';
-  describe(`Wallets env=${env} group=${groupName}]`, function () {
+  describe(`Wallets env=${env} group=${groupName}`, function () {
+    if (skipTest(groupName)) {
+      console.log(`skipping ${groupName}`);
+      return;
+    }
+
     before(async function () {
       this.timeout(120_000);
       testWallets = await ManagedWallets.create(
