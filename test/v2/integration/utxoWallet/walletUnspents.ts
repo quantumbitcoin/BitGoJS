@@ -135,5 +135,5 @@ describe('Unspent Manipulation', function() {
 
   runTests(`pure-p2sh`, makeConfig([Codes.p2sh]));
   runTests(`pure-p2shP2wsh`, makeConfig([Codes.p2shP2wsh]));
-  // runTests(`pure-p2wsh`, makeConfig([Codes.p2wsh]));
+  runTests(`pure-p2wsh`, makeConfig([Codes.p2wsh]));
 });
