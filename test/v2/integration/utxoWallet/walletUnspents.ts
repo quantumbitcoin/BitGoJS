@@ -23,7 +23,7 @@ const walletPassphrase = ManagedWallets.getPassphrase();
 
 const skipTest = (groupName) => {
   const groups = process.env.BITGOJS_INTTEST_GROUPS;
-  return (groups === undefined) || !groups.split(',').includes(groupName);
+  return (groups !== undefined) && !groups.split(',').includes(groupName);
 };
 
 const runTests = (groupName: string, walletConfig: IWalletConfig) => {
