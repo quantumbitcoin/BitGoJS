@@ -420,7 +420,13 @@ export class ManagedWallets {
           }
           return Promise.all(
             Array(count).fill(0).map(
-              async () => (await w.createAddress({ chain })).address
+              async () => {
+                const addr = await w.createAddress({ chain });
+                if (addr.chain !== chain) {
+                  throw new Error(`unexpected chain ${addr.chain}, expected ${chain}`);
+                }
+                return addr.address;
+              }
             )
           );
         })
@@ -431,13 +437,20 @@ export class ManagedWallets {
           amount: this.getWalletLimits(w).resetUnspentBalance
         }));
 
-    const getSelfResetTx = async (w: BitGoWallet) =>
-      w.sendMany({
-        recipients: await getResetRecipients(w, []),
+    const getSelfResetTx = async (w: BitGoWallet) => {
+      const recipients = await getResetRecipients(w, []);
+      if (recipients.length < 2) {
+        // we at least want two recipients so we can use one as the customChangeAddress
+        throw new Error(`insufficient resetRecipients`);
+      }
+      const changeAddress = shouldRefund(w) ? faucetAddress : recipients.pop().address;
+      return w.sendMany({
         unspents: unspentMap.get(w).map((u) => u.id),
-        customChangeAddress: shouldRefund(w) ? faucetAddress : undefined,
+        recipients,
+        changeAddress,
         walletPassphrase: ManagedWallets.getPassphrase()
       });
+    };
 
     {
       debug(`Checking reset for ${wallets.length} wallets:`);
