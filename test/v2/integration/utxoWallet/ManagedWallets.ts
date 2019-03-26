@@ -302,7 +302,6 @@ export class ManagedWallets {
       resetUnspentBalance,
       minSelfResetBalance,
       maxTotalBalance
-      // maxP2sh, maxP2shP2wsh, maxP2wsh,
     };
   }
 
@@ -480,7 +479,7 @@ export class ManagedWallets {
         .map((w) => getResetRecipients(w, unspentMap.get(w)))))
       .reduce((all, rs) => [...all, ...rs], []);
 
-    const faucetBalance = this.faucet.spendableBalance();
+    const faucetBalance = this.faucet.balance();
 
     const fundableRecipients = [];
     let sum;
@@ -500,7 +499,10 @@ export class ManagedWallets {
     }
 
     if (fundableRecipients.length < faucetRecipients.length) {
-      throw new Error(`Faucet has run dry. Please deposit tbtc at ${faucetAddress}`);
+      throw new Error(
+        `Faucet has run dry (faucetBalance=${faucetBalance}) `
+        + `Please deposit tbtc at ${faucetAddress}`
+      );
     }
   }
 }
