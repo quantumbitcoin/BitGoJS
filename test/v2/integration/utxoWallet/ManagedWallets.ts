@@ -443,12 +443,16 @@ export class ManagedWallets {
         throw new Error(`insufficient resetRecipients`);
       }
       const changeAddress = shouldRefund(w) ? faucetAddress : recipients.pop().address;
-      return w.sendMany({
-        unspents: unspentMap.get(w).map((u) => u.id),
-        recipients,
-        changeAddress,
-        walletPassphrase: ManagedWallets.getPassphrase()
-      });
+      try {
+        await w.sendMany({
+          unspents: unspentMap.get(w).map((u) => u.id),
+          recipients,
+          changeAddress,
+          walletPassphrase: ManagedWallets.getPassphrase()
+        });
+      } catch (e) {
+        throw new Error(`error during self-reset for ${w.label()}: ${e}`);
+      }
     };
 
     {
