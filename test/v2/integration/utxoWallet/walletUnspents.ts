@@ -2,7 +2,7 @@
 // Tests for Wallets
 //
 
-import {BitGoWallet, CodeGroup, IUnspent, IWalletConfig, ManagedWallets, sumUnspents} from "./ManagedWallets";
+import {CodeGroup, IWalletConfig, ManagedWallets, sumUnspents} from "./ManagedWallets";
 
 import 'should';
 

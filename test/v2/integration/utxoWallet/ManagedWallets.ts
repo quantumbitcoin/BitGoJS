@@ -11,7 +11,6 @@ import debugLib from 'debug';
 const debug = debugLib('ManagedWallets');
 
 import * as BitGo from '../../../../src/bitgo';
-import {min} from "moment";
 
 export type BitGoWallet = any;
 
