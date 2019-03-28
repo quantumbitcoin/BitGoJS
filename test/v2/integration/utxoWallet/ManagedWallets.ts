@@ -5,11 +5,12 @@ Bluebird.longStackTraces();
 
 import * as nock from 'nock';
 
-import { Codes } from '@bitgo/unspents';
+import {Codes, Dimensions, IDimensions} from '@bitgo/unspents';
 
 import debugLib from 'debug';
 const debug = debugLib('ManagedWallets');
 
+import * as utxolib from 'bitgo-utxo-lib';
 import * as BitGo from '../../../../src/bitgo';
 
 export type BitGoWallet = any;
@@ -65,6 +66,17 @@ export interface IWalletLimits {
 }
 
 const codeGroups = [Codes.p2sh, Codes.p2shP2wsh, Codes.p2wsh];
+
+const getDimensions = (unspents: IUnspent[], outputScripts: Buffer[]): IDimensions =>
+  Dimensions.fromUnspents(unspents)
+    .plus(Dimensions.sum(
+      ...outputScripts.map((s) => Dimensions.fromOutputScriptLength(s.length))
+    ));
+
+const getMaxSpendable = (unspents: IUnspent[], outputScripts: Buffer[], feeRate: number) => {
+  const cost = getDimensions(unspents, outputScripts).getVSize() * feeRate / 1000;
+  return Math.floor(sumUnspents(unspents) - cost);
+};
 
 export class ManagedWallets {
   static async create(
@@ -153,6 +165,7 @@ export class ManagedWallets {
       const mw = this;
       after(async function () {
         this.timeout(600_000);
+        debug('resetWallets() start');
         await mw.resetWallets();
         debug('resetWallets() finished');
       });
@@ -242,6 +255,14 @@ export class ManagedWallets {
     return this.walletUnspents.get(w);
   }
 
+  public getMaxSpendable(us: IUnspent[], recipients: string[], feeRate: number) {
+    return getMaxSpendable(
+      us,
+      recipients.map((a) => utxolib.address.toOutputScript(a, this.network)),
+      feeRate
+    );
+  }
+
   /**
    * Returns a wallet with given label. If wallet with label does not exist yet, create it.
    * @param allWallets
@@ -304,6 +325,16 @@ export class ManagedWallets {
     };
   }
 
+  private getExcessUnspents(w, unspents: IUnspent[]): IUnspent[] {
+    const excessByCode = [Codes.p2sh, Codes.p2shP2wsh, Codes.p2wsh]
+      .map((codes) => {
+        const us = unspents.filter((u) => codes.has(u.chain));
+        const excessCount = this.walletConfig.getMaxUnspents(codes) - us.length;
+        return us.slice(0, excessCount);
+      });
+    return excessByCode.reduce((all, us) => [...all, ...us]);
+  }
+
   private getRequiredUnspents(w: BitGoWallet, unspents: IUnspent[]): [ChainCode, number][] {
     const limits = this.getWalletLimits(w);
 
@@ -317,7 +348,8 @@ export class ManagedWallets {
       });
   }
 
-  private needsReset(w: BitGoWallet, unspents: IUnspent[]): boolean {
+  private needsReset(w: BitGoWallet, unspents: IUnspent[]):
+    { excessBalance: boolean, excessUnspents: boolean, missingUnspent: boolean } | undefined {
     const excessBalance =
       sumUnspents(unspents) > this.getWalletLimits(w).maxTotalBalance;
     const excessUnspents =
@@ -329,19 +361,34 @@ export class ManagedWallets {
     const missingUnspent =
       this.getRequiredUnspents(w, unspents).some(([code, count]) => count > 0);
 
-    debug(`needsReset ${w.label()}`, { excessBalance, excessUnspents, missingUnspent });
+    debug(`needsReset ${w.label()}:`);
+    debug(` unspents=${this.dumpUnspents(unspents)}`);
+    debug(` ` + Object
+        .entries({ excessBalance, excessUnspents, missingUnspent })
+        .filter(([k, v]) => v)
+        .map(([k]) => k)
+        .join(',') || 'noResetRequired'
+    );
 
-    return excessBalance || excessUnspents || missingUnspent;
+    if (excessBalance || excessUnspents || missingUnspent) {
+      return { excessBalance, excessUnspents, missingUnspent };
+    }
   }
 
-  private isConfirmed(u: IUnspent, minConfirms = 3) {
-    return (this.chainhead - u.blockHeight) >= minConfirms
+  private getConfirmations(u: IUnspent) {
+    return Math.max(0, this.chainhead - u.blockHeight + 1);
   }
 
   private isReady(w: BitGoWallet, unspents: IUnspent[]): boolean {
-    const minConfirms = 3;
-    return this.getRequiredUnspents(w, unspents.filter((u) => this.isConfirmed(u)))
-      .every(([code, count]) => count <= 0);
+    return this.getRequiredUnspents(
+      w, unspents.filter((u) => this.getConfirmations(u) > 2)
+    ).every(([code, count]) => count <= 0);
+  }
+
+  private dumpUnspents(unspents: IUnspent[]): string {
+    return unspents
+      .map((u) => `{chain=${u.chain},conf=${this.getConfirmations(u)}}`)
+      .join(',');
   }
 
   /**
@@ -357,18 +404,28 @@ export class ManagedWallets {
     }
 
     let found;
+    const stats = { nUsed: 0, nNeedsReset: 0, nNotReady: 0 };
+
     for (const w of (await this.wallets)) {
-      if (this.walletsUsed.has(w)) {
+      const unspents = await this.getUnspents(w);
+      const isUsed = this.walletsUsed.has(w);
+      const needsReset = this.needsReset(w, unspents);
+      const notReady = !this.isReady(w, unspents);
+
+      stats.nUsed += isUsed ? 1 : 0;
+      stats.nNeedsReset += needsReset ? 1 : 0;
+      stats.nNotReady += notReady ? 1 : 0;
+
+      if (isUsed) {
         continue;
       }
 
-      const unspents = await this.getUnspents(w);
-      if (this.needsReset(w, unspents)) {
+      if (needsReset) {
         debug(`skipping wallet ${w.label()}: needs reset`);
         continue;
       }
 
-      if (!this.isReady(w, unspents)) {
+      if (notReady) {
         debug(`skipping wallet ${w.label()}: not ready`);
         continue;
       }
@@ -380,7 +437,10 @@ export class ManagedWallets {
     }
 
     if (found === undefined) {
-      throw new Error(`No wallet matching criteria found.`);
+      throw new Error(
+        `No wallet matching criteria found ` +
+      `(nUsed=${stats.nUsed},nNeedsReset=${stats.nNeedsReset},nNotReady=${stats.nNotReady})`
+      );
     }
 
     this.walletsUsed.add(found);
@@ -435,32 +495,12 @@ export class ManagedWallets {
           amount: this.getWalletLimits(w).resetUnspentBalance
         }));
 
-    const trySelfReset = async (w: BitGoWallet) => {
-      const recipients = await getResetRecipients(w, []);
-      if (recipients.length < 2) {
-        // we at least want two recipients so we can use one as the customChangeAddress
-        throw new Error(`insufficient resetRecipients`);
-      }
-      const changeAddress = shouldRefund(w) ? faucetAddress : recipients.pop().address;
-      try {
-        await w.sendMany({
-          unspents: unspentMap.get(w).map((u) => u.id),
-          recipients,
-          changeAddress,
-          walletPassphrase: ManagedWallets.getPassphrase()
-        });
-        return null;
-      } catch (e) {
-        return new Error(`error during self-reset for ${w.label()}: ${e}`);
-      }
-    };
-
     {
       debug(`Checking reset for ${wallets.length} wallets:`);
       wallets.forEach((w) => {
         const unspents = unspentMap.get(w);
         debug(`wallet ${w.label()}`);
-        debug(` unspents`, unspents.map((u) => [u.chain, u.value, 'confirmed='+this.isConfirmed(u)]));
+        debug(` unspents`, this.dumpUnspents(unspents));
         debug(` balance`, sumUnspents(unspents));
         debug(` needsReset`, this.needsReset(w, unspents));
         debug(` canSelfReset`, canSelfReset(w));
@@ -471,16 +511,81 @@ export class ManagedWallets {
     const resetWallets = (await this.wallets)
       .filter((w) => this.needsReset(w, unspentMap.get(w)));
 
-    const resetErrors = (await Promise.all(
-      resetWallets
-      .filter(canSelfReset)
-      .map(trySelfReset)
-    )).filter((e) => e !== null);
+    const selfResetWallets = resetWallets.filter(canSelfReset);
+    const faucetResetWallets = resetWallets.filter((w) => !canSelfReset(w));
+    const excessUnspentWallets = faucetResetWallets
+      .filter((w) => this.needsReset(w, unspentMap.get(w)).excessUnspents);
+
+    const resetErrors = [];
+
+    debug(`exec trySelfReset() for ${selfResetWallets.length} wallets...`);
+    const trySelfReset = async (w: BitGoWallet) => {
+      const recipients = await getResetRecipients(w, []);
+      if (recipients.length < 2) {
+        // we at least want two recipients so we can use one as the customChangeAddress
+        throw new Error(`insufficient resetRecipients`);
+      }
+      const changeAddress = shouldRefund(w) ? faucetAddress : recipients.pop().address;
+      return w.sendMany({
+        unspents: unspentMap.get(w).map((u) => u.id),
+        recipients,
+        changeAddress,
+        walletPassphrase: ManagedWallets.getPassphrase()
+      });
+    };
+    resetErrors.push(...(
+      await Promise.all(resetWallets.map(async (w) => {
+        try {
+          await trySelfReset(w);
+          return null;
+        } catch (e) {
+          return new Error(`Error in trySelfReset(${w.label()}): ${e}`);
+        }
+      }))).filter(e => e != null)
+    );
+
+    debug(`spend excessUnspents ${excessUnspentWallets.length} wallets`);
+    const trySpendExcessUnspents = async (w: BitGoWallet) => {
+      const excessUnspents = this.getExcessUnspents(w, await this.getUnspents(w, { cache: false }));
+      if (excessUnspents.length === 0) {
+        return;
+      }
+      const feeRate = 10_000;
+      const amount = this.getMaxSpendable(excessUnspents, [faucetAddress], feeRate);
+      const { tx: txHex } = await w.sendMany({
+        feeRate,
+        unspents: excessUnspents.map(u => u.id),
+        recipients: [{ address: faucetAddress, amount }],
+        walletPassphrase: ManagedWallets.getPassphrase()
+      });
+      const parsedTx = utxolib.Transaction.fromHex(txHex, this.network);
+      if (parsedTx.outs.length !== 1) {
+        throw new Error(`unexpected change output`);
+      }
+      unspentMap.set(w, unspentMap.get(w).filter(u => !excessUnspents.includes(u)));
+    };
+    resetErrors.push(...(
+      await Promise.all(excessUnspentWallets.map(async (w) => {
+        try {
+          await trySpendExcessUnspents(w);
+          return null;
+        } catch (e) {
+          return new Error(`error in spendExcessUnspents(${w.label()}): ${e}`);
+        }
+      }))).filter(e => e !== null)
+    );
 
     const faucetRecipients =
-      (await Promise.all(resetWallets
-        .filter((w) => !canSelfReset(w))
-        .map((w) => getResetRecipients(w, unspentMap.get(w)))))
+      (await Promise.all(
+        faucetResetWallets.map(
+          (w) => getResetRecipients(w, unspentMap.get(w)))
+        )
+      ).map((rs, i) => {
+        if (rs.length === 0) {
+          resetErrors.push(new Error(`empty faucetRecipients for ${ faucetResetWallets[i].label()}`))
+        }
+        return rs;
+      })
       .reduce((all, rs) => [...all, ...rs], []);
 
     const faucetBalance = this.faucet.balance();
@@ -495,6 +600,7 @@ export class ManagedWallets {
       return true;
     });
 
+    debug(`fund ${fundableRecipients.length} recipients...`);
     if (fundableRecipients.length > 0) {
       await this.faucet.sendMany({
         recipients: fundableRecipients,
@@ -510,7 +616,7 @@ export class ManagedWallets {
     }
 
     if (resetErrors.length > 0) {
-      resetErrors.forEach(e => console.error(e));
+      resetErrors.forEach((e, i) => console.error(`Error ${i}:`, e));
       throw new Error(`There were ${resetErrors.length} reset errors. See log for details.`);
     }
   }

@@ -46,6 +46,20 @@ const runTests = (groupName: string, walletConfig: IWalletConfig) => {
       );
     });
 
+    it('should self-send to new default receive addr', async function () {
+      this.timeout(60_000);
+      const wallet = await testWallets.getNextWallet();
+      const unspents = await testWallets.getUnspents(wallet);
+      const address = wallet.receiveAddress();
+      const feeRate = 10_000;
+      const amount = Math.floor(testWallets.getMaxSpendable(unspents, [address], feeRate) / 2);
+      await wallet.sendMany({
+        feeRate,
+        recipients: [{ address, amount }],
+        walletPassphrase: ManagedWallets.getPassphrase()
+      });
+    });
+
     it('should consolidate the number of unspents to 2', async function () {
       this.timeout(60_000);
 
@@ -77,7 +91,6 @@ const runTests = (groupName: string, walletConfig: IWalletConfig) => {
       transaction.status.should.equal('signed');
 
       await wait(10);
-
       const { unspents } = await wallet.unspents({ limit: 100 });
       unspents.length.should.equal(20);
     });
@@ -108,14 +121,7 @@ const runTests = (groupName: string, walletConfig: IWalletConfig) => {
       const unspents = await testWallets.getUnspents(wallet);
       const feeRate = 10_000;
       const address = wallet.receiveAddress();
-      const dims = Dimensions
-        .fromUnspents(unspents)
-        .plus(Dimensions.fromOutput({
-          script: utxolib.address.toOutputScript(address, testWallets.network)
-        }));
-      const txCost = dims.getVSize() * feeRate / 1000;
-      const amount = sumUnspents(unspents) - txCost;
-      debug({ dims, txCost, amount });
+      const amount = testWallets.getMaxSpendable(unspents, [address], feeRate);
       const prebuild = await wallet.prebuildTransaction({
         recipients: [{ address, amount }],
         strategy: 'BNB',
