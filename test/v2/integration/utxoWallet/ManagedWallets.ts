@@ -435,7 +435,7 @@ export class ManagedWallets {
           amount: this.getWalletLimits(w).resetUnspentBalance
         }));
 
-    const getSelfResetTx = async (w: BitGoWallet) => {
+    const trySelfReset = async (w: BitGoWallet) => {
       const recipients = await getResetRecipients(w, []);
       if (recipients.length < 2) {
         // we at least want two recipients so we can use one as the customChangeAddress
@@ -449,8 +449,9 @@ export class ManagedWallets {
           changeAddress,
           walletPassphrase: ManagedWallets.getPassphrase()
         });
+        return null;
       } catch (e) {
-        throw new Error(`error during self-reset for ${w.label()}: ${e}`);
+        return new Error(`error during self-reset for ${w.label()}: ${e}`);
       }
     };
 
@@ -470,11 +471,11 @@ export class ManagedWallets {
     const resetWallets = (await this.wallets)
       .filter((w) => this.needsReset(w, unspentMap.get(w)));
 
-    await Promise.all(
+    const resetErrors = (await Promise.all(
       resetWallets
       .filter(canSelfReset)
-      .map(getSelfResetTx)
-    );
+      .map(trySelfReset)
+    )).filter((e) => e !== null);
 
     const faucetRecipients =
       (await Promise.all(resetWallets
@@ -502,10 +503,15 @@ export class ManagedWallets {
     }
 
     if (fundableRecipients.length < faucetRecipients.length) {
-      throw new Error(
+      resetErrors.push(new Error(
         `Faucet has run dry (faucetBalance=${faucetBalance}) `
         + `Please deposit tbtc at ${faucetAddress}`
-      );
+      ));
+    }
+
+    if (resetErrors.length > 0) {
+      resetErrors.forEach(e => console.error(e));
+      throw new Error(`There were ${resetErrors.length} reset errors. See log for details.`);
     }
   }
 }
