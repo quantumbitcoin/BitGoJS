@@ -46,13 +46,13 @@ const runTests = (groupName: string, walletConfig: IWalletConfig) => {
       );
     });
 
-    it.only('should self-send to new default receive addr', async function () {
+    it('should self-send to new default receive addr', async function () {
       this.timeout(60_000);
       const wallet = await testWallets.getNextWallet();
       const unspents = await testWallets.getUnspents(wallet);
       const address = wallet.receiveAddress();
       const feeRate = 10_000;
-      const amount = Math.floor(testWallets.getMaxSpendable(unspents, [address], feeRate) / 2);
+      const amount = Math.floor(testWallets.chain.getMaxSpendable(unspents, [address], feeRate) / 2);
       await wallet.sendMany({
         feeRate,
         recipients: [{ address, amount }],
@@ -63,7 +63,7 @@ const runTests = (groupName: string, walletConfig: IWalletConfig) => {
     it('should consolidate the number of unspents to 2', async function () {
       this.timeout(60_000);
 
-      const wallet = await testWallets.getNextWallet((w, unspents) => unspents.length > 2);
+      const wallet = await testWallets.getNextWallet((w, unspents) => unspents.length > 4);
 
       const transaction = await wallet.consolidateUnspents({
         limit: 250,
@@ -73,7 +73,7 @@ const runTests = (groupName: string, walletConfig: IWalletConfig) => {
         walletPassphrase
       });
       transaction.status.should.equal('signed');
-      await wait(10);
+      await wait(20);
       (await wallet.unspents({ limit: 100 })).unspents.length.should.eql(2);
     });
 
@@ -81,7 +81,10 @@ const runTests = (groupName: string, walletConfig: IWalletConfig) => {
       this.timeout(60_000);
 
       const wallet = await testWallets.getNextWallet();
+      // it sometimes complains with high feeRates
+      const feeRate = 1000;
       const transaction = await wallet.fanoutUnspents({
+        feeRate,
         minHeight: 1,
         maxNumInputsToUse: 80,
         numUnspentsToMake: 20,
@@ -97,9 +100,7 @@ const runTests = (groupName: string, walletConfig: IWalletConfig) => {
 
     it('should sweep funds from one wallet to another', async function () {
       this.timeout(60_000);
-      const sweepWallet = await testWallets.getNextWallet(
-        (w) => w.balance() === w.confirmedBalance()
-      );
+      const sweepWallet = await testWallets.getNextWallet(testWallets.getPredicateUnspentsConfirmed(6));
       const targetWallet = await testWallets.getNextWallet();
       const targetWalletUnspents = await testWallets.getUnspents(targetWallet);
 
@@ -121,7 +122,7 @@ const runTests = (groupName: string, walletConfig: IWalletConfig) => {
       const unspents = await testWallets.getUnspents(wallet);
       const feeRate = 10_000;
       const address = wallet.receiveAddress();
-      const amount = testWallets.getMaxSpendable(unspents, [address], feeRate);
+      const amount = testWallets.chain.getMaxSpendable(unspents, [address], feeRate);
       const prebuild = await wallet.prebuildTransaction({
         recipients: [{ address, amount }],
         strategy: 'BNB',
@@ -150,6 +151,6 @@ describe('Unspent Manipulation', function() {
   });
 
   runTests(`pure-p2sh`, makeConfig([Codes.p2sh]));
-  // runTests(`pure-p2shP2wsh`, makeConfig([Codes.p2shP2wsh]));
-  // runTests(`pure-p2wsh`, makeConfig([Codes.p2wsh]));
+  runTests(`pure-p2shP2wsh`, makeConfig([Codes.p2shP2wsh]));
+  runTests(`pure-p2wsh`, makeConfig([Codes.p2wsh]));
 });

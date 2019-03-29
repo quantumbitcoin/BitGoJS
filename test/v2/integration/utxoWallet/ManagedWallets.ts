@@ -13,6 +13,8 @@ const debug = debugLib('ManagedWallets');
 import * as utxolib from 'bitgo-utxo-lib';
 import * as BitGo from '../../../../src/bitgo';
 
+const concurrencyBitGoApi = 4;
+
 export type BitGoWallet = any;
 
 export interface IUnspent {
@@ -83,9 +85,14 @@ const getMaxSpendable = (unspents: IUnspent[], outputScripts: Buffer[], feeRate:
   return Math.floor(sumUnspents(unspents) - cost);
 };
 
-const dumpUnspents = (unspents: IUnspent[], chain: Timechain): string =>
+const dumpUnspents = (unspents: IUnspent[], chain: Timechain, { value = false } = {}): string =>
   unspents
-    .map((u) => `{chain=${u.chain},conf=${chain.getConfirmations(u)}}`)
+    .map((u) => ({
+      chain: u.chain,
+      conf: chain.getConfirmations(u),
+      ...(value ? { value: u.value } : {})
+    }))
+    .map((obj) => Object.entries(obj).map(([k, v]) => `${k}=${v}`).join(','))
     .join(',');
 
 
@@ -114,9 +121,8 @@ class Timechain {
 
 
 export class ManagedWallet {
-  public used = false;
-
   public constructor(
+    public usedWallets: Set<BitGoWallet>,
     public chain: Timechain,
     public walletConfig: IWalletConfig,
     public wallet: BitGoWallet,
@@ -142,7 +148,11 @@ export class ManagedWallet {
   }
 
   public isUsed(): boolean {
-    return this.used;
+    return this.usedWallets.has(this.wallet);
+  }
+
+  public setUsed() {
+    this.usedWallets.add(this.wallet);
   }
 
   public isReady(): boolean {
@@ -237,8 +247,10 @@ export class ManagedWallet {
       // we at least want two recipients so we can use one as the customChangeAddress
       throw new Error(`insufficient resetRecipients`);
     }
+    const feeRate = 20_000;
     const changeAddress = this.shouldRefund() ? faucetAddress : recipients.pop().address;
-    return this.wallet.sendMany({
+    this.wallet.sendMany({
+      feeRate,
       unspents: this.unspents.map((u) => u.id),
       recipients,
       changeAddress,
@@ -251,7 +263,7 @@ export class ManagedWallet {
     if (excessUnspents.length === 0) {
       return;
     }
-    const feeRate = 10_000;
+    const feeRate = 20_000;
     const amount = this.chain.getMaxSpendable(excessUnspents, [faucetAddress], feeRate);
     const { tx: txHex } = await this.wallet.sendMany({
       feeRate,
@@ -279,6 +291,8 @@ export class ManagedWallet {
     debug(` shouldRefund`, this.shouldRefund());
   }
 }
+
+type ManagedWalletPredicate = (w: BitGoWallet, us: IUnspent[]) => boolean;
 
 export class ManagedWallets {
   static async create(
@@ -314,20 +328,23 @@ export class ManagedWallets {
     return '7fdfda5f50a433ae127a784fc143105fb6d93fedec7601ddeb3d1d584f83de05';
   }
 
+  public getPredicateUnspentsConfirmed(confirmations: number): ManagedWalletPredicate {
+    return (w: BitGoWallet, us: IUnspent[]) =>
+      us.every((u) => this.chain.getConfirmations(u) >= confirmations);
+  }
 
 
-  public network: any;
+  public chain: Timechain;
 
   private username: string;
   private password: string;
-  private chain: Timechain;
   private bitgo: any;
   private basecoin: any;
   private walletList: BitGoWallet[];
   private wallets: Promise<BitGoWallet[]>;
+  private usedWallets: Set<BitGoWallet> = new Set();
   private faucet: BitGoWallet;
   private walletUnspents: Map<BitGoWallet, Promise<IUnspent[]>> = new Map();
-  private walletsUsed: Set<BitGoWallet> = new Set();
   private walletConfig: IWalletConfig;
   private poolSize: number;
   private labelPrefix: string;
@@ -358,7 +375,6 @@ export class ManagedWallets {
     // @ts-ignore
     this.bitgo = new BitGo({ env });
     this.basecoin = this.bitgo.coin('tbtc');
-    this.network = this.basecoin._network;
     this.poolSize = poolSize;
     this.walletConfig = walletConfig;
     this.labelPrefix = `managed/${groupName}/`;
@@ -390,13 +406,6 @@ export class ManagedWallets {
     return Number(idx);
   }
 
-  /**
-   * Initialize a number wallets with a minimal balance.
-   *
-   * @param poolSize
-   * @param minBalanceSat
-   * @return {*}
-   */
   private async init(): Promise<this> {
     debug(`init poolSize=${this.poolSize}`);
     nock.cleanAll();
@@ -404,7 +413,7 @@ export class ManagedWallets {
     await this.bitgo.fetchConstants();
 
     const { height } = await this.bitgo.get(this.basecoin.url('/public/block/latest')).result();
-    this.chain = new Timechain(height, this.network);
+    this.chain = new Timechain(height, this.basecoin._network);
 
     const response = await this.bitgo.authenticate({
       username: this.username,
@@ -502,9 +511,17 @@ export class ManagedWallets {
   }
 
   public async getAll(): Promise<ManagedWallet[]> {
-    return Promise.all((await this.wallets).map(
-      async (w) => new ManagedWallet(this.chain, this.walletConfig, w, await this.getUnspents(w))
-    ));
+    return Bluebird.map(
+      (await this.wallets),
+      async (w) => new ManagedWallet(
+        this.usedWallets,
+        this.chain,
+        this.walletConfig,
+        w,
+        await this.getUnspents(w)
+      ),
+      { concurrency: concurrencyBitGoApi }
+    );
   }
 
   /**
@@ -512,7 +529,7 @@ export class ManagedWallets {
    * @param predicate - Callback with wallet as argument. Can return promise.
    * @return {*}
    */
-  async getNextWallet(predicate = (w: BitGoWallet, us: IUnspent[]) => true): Promise<BitGoWallet> {
+  async getNextWallet(predicate: ManagedWalletPredicate = () => true): Promise<BitGoWallet> {
     if (predicate !== undefined) {
       if (!_.isFunction(predicate)) {
         throw new Error(`condition must be function`);
@@ -523,9 +540,9 @@ export class ManagedWallets {
     const stats = { nUsed: 0, nNeedsReset: 0, nNotReady: 0 };
 
     for (const mw of await this.getAll()) {
-      const isUsed = mw.isUsed();
+      const isUsed = this.usedWallets.has(mw.wallet);
       const needsReset = mw.needsReset();
-      const notReady = !mw.needsReset();
+      const notReady = !mw.isReady();
 
       stats.nUsed += isUsed ? 1 : 0;
       stats.nNeedsReset += needsReset ? 1 : 0;
@@ -558,15 +575,18 @@ export class ManagedWallets {
       );
     }
 
-    found.used = true;
+    debug(`found wallet ${found} unspents=${dumpUnspents(found.unspents, this.chain, { value: true })}`);
 
+    found.setUsed();
     return found.wallet;
   }
 
   async resetWallets() {
     // refresh unspents of used wallets
-    for (const w of this.walletsUsed) {
-      this.getUnspents(w, { cache: false });
+    for (const mw of await this.getAll()) {
+      if (mw.isUsed()) {
+        this.getUnspents(mw.wallet, { cache: false });
+      }
     }
 
     const managedWallets = await this.getAll();
@@ -582,42 +602,53 @@ export class ManagedWallets {
 
     const resetErrors = [];
 
-    const runCollectErrors = async (tag: string, errors: Error[], promises: Promise<any>[]) => {
+    const runCollectErrors = async (
+      errors: Error[],
+      wallets: ManagedWallet[],
+      funcName: string,
+      func: (mw) => Promise<void>[]
+    ) => {
       errors.push(...(
-        await Promise.all(promises.map(async (p): Promise<Error | null> => {
+        await Bluebird.map(wallets, async (mw): Promise<Error | null> => {
           try {
-            await p;
+            await func(mw);
             return null;
           } catch (e) {
-            e.message = `Error in ${tag}: ${e.message}`;
+            console.error(`Error for wallet ${mw}`, e);
             return e;
           }
-        }))
+        }, { concurrency: concurrencyBitGoApi })
       ).filter((e) => e !== null))
     };
 
     debug(`exec trySelfReset() for ${selfResetWallets.length} wallets...`);
-    runCollectErrors(
-      `trySelfReset`,
+    await runCollectErrors(
       resetErrors,
-      resetWallets.map(mw => mw.trySelfReset(faucetAddress))
+      selfResetWallets,
+      `trySelfReset`,
+      (mw) => mw.trySelfReset(faucetAddress)
     );
 
     debug(`spend excessUnspents ${excessUnspentWallets.length} wallets...`);
-    runCollectErrors(
-      `trySpendExcessUnspents`,
+    await runCollectErrors(
       resetErrors,
-      resetWallets.map(mw => mw.trySpendExcessUnspents(faucetAddress))
+      excessUnspentWallets,
+      `trySpendExcessUnspents`,
+      (mw) => mw.trySpendExcessUnspents(faucetAddress)
     );
 
     const faucetRecipients =
-      (await Promise.all(faucetResetWallets.map(mw => mw.getResetRecipients(faucetAddress))))
-        .map((rs: IRecipient[], i) => {
-          if (rs.length === 0) {
-            resetErrors.push(new Error(`empty faucetRecipients for ${faucetResetWallets[i]}`))
-          }
-          return rs;
-        })
+      (await Bluebird.map(
+        faucetResetWallets,
+        mw => mw.getResetRecipients(mw.unspents),
+        { concurrency: concurrencyBitGoApi }
+      ))
+      .map((rs: IRecipient[], i) => {
+        if (rs.length === 0) {
+          resetErrors.push(new Error(`empty faucetRecipients for ${faucetResetWallets[i]}`))
+        }
+        return rs;
+      })
       .reduce((all, rs) => [...all, ...rs], []);
 
     const faucetBalance = this.faucet.balance();
@@ -634,7 +665,9 @@ export class ManagedWallets {
 
     debug(`fund ${fundableRecipients.length} recipients...`);
     if (fundableRecipients.length > 0) {
+      const feeRate = 20_000;
       await this.faucet.sendMany({
+        feeRate,
         recipients: fundableRecipients,
         walletPassphrase: ManagedWallets.getPassphrase(),
       });
