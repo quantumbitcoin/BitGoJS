@@ -41,12 +41,12 @@ const runTests = (groupName: string, walletConfig: IWalletConfig) => {
       testWallets = await ManagedWallets.create(
         env,
         'otto+e2e-utxowallets@bitgo.com',
-       groupName,
+        groupName,
         walletConfig,
       );
     });
 
-    it('should self-send to new default receive addr', async function () {
+    it.only('should self-send to new default receive addr', async function () {
       this.timeout(60_000);
       const wallet = await testWallets.getNextWallet();
       const unspents = await testWallets.getUnspents(wallet);
@@ -150,6 +150,6 @@ describe('Unspent Manipulation', function() {
   });
 
   runTests(`pure-p2sh`, makeConfig([Codes.p2sh]));
-  runTests(`pure-p2shP2wsh`, makeConfig([Codes.p2shP2wsh]));
-  runTests(`pure-p2wsh`, makeConfig([Codes.p2wsh]));
+  // runTests(`pure-p2shP2wsh`, makeConfig([Codes.p2shP2wsh]));
+  // runTests(`pure-p2wsh`, makeConfig([Codes.p2wsh]));
 });

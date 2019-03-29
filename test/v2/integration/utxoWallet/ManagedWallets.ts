@@ -29,6 +29,11 @@ export interface IUnspent {
   isSegwit: boolean;
 }
 
+export interface IRecipient {
+  address: string;
+  amount: number;
+}
+
 export declare type ChainCode = number;
 
 enum UnspentType {
@@ -78,6 +83,203 @@ const getMaxSpendable = (unspents: IUnspent[], outputScripts: Buffer[], feeRate:
   return Math.floor(sumUnspents(unspents) - cost);
 };
 
+const dumpUnspents = (unspents: IUnspent[], chain: Timechain): string =>
+  unspents
+    .map((u) => `{chain=${u.chain},conf=${chain.getConfirmations(u)}}`)
+    .join(',');
+
+
+class Timechain {
+  public constructor(
+    public chainHead: number,
+    public network: any,
+  ) { }
+
+  public getMaxSpendable(us: IUnspent[], recipients: string[], feeRate: number) {
+    return getMaxSpendable(
+      us,
+      recipients.map((a) => utxolib.address.toOutputScript(a, this.network)),
+      feeRate
+    );
+  }
+
+  public getConfirmations(u: IUnspent) {
+    return Math.max(0, this.chainHead - u.blockHeight + 1);
+  }
+
+  public parseTx(txHex: string) {
+    return utxolib.Transaction.fromHex(txHex, this.network);
+  }
+}
+
+
+export class ManagedWallet {
+  public used = false;
+
+  public constructor(
+    public chain: Timechain,
+    public walletConfig: IWalletConfig,
+    public wallet: BitGoWallet,
+    public unspents: IUnspent[],
+  ) { }
+
+  public getWalletLimits(): IWalletLimits {
+    const nMinTotal = codeGroups
+      .reduce((sum, codeGroup) => sum + this.walletConfig.getMinUnspents(codeGroup), 0);
+    const nResetTotal = nMinTotal * 2;
+
+    const minUnspentBalance = 0.001e8;
+    const resetUnspentBalance = minUnspentBalance * 2;
+    const minSelfResetBalance = nResetTotal * resetUnspentBalance * 1.1;
+    const maxTotalBalance = 2 * nResetTotal * resetUnspentBalance;
+
+    return {
+      minUnspentBalance,
+      resetUnspentBalance,
+      minSelfResetBalance,
+      maxTotalBalance
+    };
+  }
+
+  public isUsed(): boolean {
+    return this.used;
+  }
+
+  public isReady(): boolean {
+    return this.getRequiredUnspents(
+      this.unspents.filter((u) => this.chain.getConfirmations(u) > 2)
+    ).every(([code, count]) => count <= 0);
+  }
+
+  public canSelfReset(): boolean {
+    return sumUnspents(this.unspents) > this.getWalletLimits().minSelfResetBalance;
+  }
+
+  public shouldRefund(): boolean {
+    return sumUnspents(this.unspents) > this.getWalletLimits().maxTotalBalance;
+  }
+
+  private getExcessUnspents(unspents: IUnspent[]): IUnspent[] {
+    const excessByCode = [Codes.p2sh, Codes.p2shP2wsh, Codes.p2wsh]
+      .map((codes) => {
+        const us = unspents.filter((u) => codes.has(u.chain));
+        const excessCount = this.walletConfig.getMaxUnspents(codes) - us.length;
+        return us.slice(0, excessCount);
+      });
+    return excessByCode.reduce((all, us) => [...all, ...us]);
+  }
+
+  public async getResetRecipients(us: IUnspent[]): Promise<IRecipient[]> {
+    return (await Promise.all(this.getRequiredUnspents(us)
+      .map(async ([chain, count]) => {
+        if (count <= 0) {
+          return [];
+        }
+        return Promise.all(
+          Array(count).fill(0).map(
+            async () => {
+              const addr = await this.wallet.createAddress({ chain });
+              if (addr.chain !== chain) {
+                throw new Error(`unexpected chain ${addr.chain}, expected ${chain}`);
+              }
+              return addr.address;
+            }
+          )
+        );
+      })
+    ))
+      .reduce((all, rs) => [...all, ...rs])
+      .map((address) => ({
+        address,
+        amount: this.getWalletLimits().resetUnspentBalance
+      }));
+  }
+
+  public getRequiredUnspents(unspents: IUnspent[]): [ChainCode, number][] {
+    const limits = this.getWalletLimits();
+
+    return [Codes.p2sh, Codes.p2shP2wsh, Codes.p2wsh]
+      .map((codes: CodesByPurpose): [ChainCode, number] => {
+        const count = unspents
+          .filter((u) => u.value > limits.minUnspentBalance)
+          .filter((u) => codes.has(u.chain)).length;
+        const resetCount = (min, count) => (count >= min) ? 0 : 2 * min - count;
+        return [codes.external, resetCount(this.walletConfig.getMinUnspents(codes), count)];
+      });
+  }
+
+  public needsReset(): { excessBalance: boolean, excessUnspents: boolean, missingUnspent: boolean } | undefined {
+    const excessBalance = sumUnspents(this.unspents) > this.getWalletLimits().maxTotalBalance;
+    const excessUnspents =
+      codeGroups.some((group) =>
+        this.unspents.filter((u) => group.has(u.chain)).length > this.walletConfig.getMaxUnspents(group)
+      );
+    const missingUnspent =
+      this.getRequiredUnspents(this.unspents).some(([code, count]) => count > 0);
+
+    debug(`needsReset ${this.wallet.label()}:`);
+    debug(` unspents=${dumpUnspents(this.unspents, this.chain)}`);
+    debug(` ` + Object
+      .entries({ excessBalance, excessUnspents, missingUnspent })
+      .filter(([k, v]) => v)
+      .map(([k]) => k)
+      .join(',') || 'noResetRequired'
+    );
+
+    if (excessBalance || excessUnspents || missingUnspent) {
+      return { excessBalance, excessUnspents, missingUnspent };
+    }
+  }
+
+  public async trySelfReset(faucetAddress: string) {
+    const recipients = await this.getResetRecipients([]);
+    if (recipients.length < 2) {
+      // we at least want two recipients so we can use one as the customChangeAddress
+      throw new Error(`insufficient resetRecipients`);
+    }
+    const changeAddress = this.shouldRefund() ? faucetAddress : recipients.pop().address;
+    return this.wallet.sendMany({
+      unspents: this.unspents.map((u) => u.id),
+      recipients,
+      changeAddress,
+      walletPassphrase: ManagedWallets.getPassphrase()
+    });
+  }
+
+  public async trySpendExcessUnspents(faucetAddress: string) {
+    const excessUnspents = this.getExcessUnspents(this.unspents);
+    if (excessUnspents.length === 0) {
+      return;
+    }
+    const feeRate = 10_000;
+    const amount = this.chain.getMaxSpendable(excessUnspents, [faucetAddress], feeRate);
+    const { tx: txHex } = await this.wallet.sendMany({
+      feeRate,
+      unspents: excessUnspents.map(u => u.id),
+      recipients: [{ address: faucetAddress, amount }],
+      walletPassphrase: ManagedWallets.getPassphrase()
+    });
+    const parsedTx = this.chain.parseTx(txHex);
+    if (parsedTx.outs.length !== 1) {
+      throw new Error(`unexpected change output`);
+    }
+    this.unspents = (await this.wallet.unspents()).unspents;
+  }
+
+  public toString(): string {
+    return `ManagedWallet[${this.wallet.label()}]`;
+  }
+
+  public dump() {
+    debug(`wallet ${this.wallet.label()}`);
+    debug(` unspents`, dumpUnspents(this.unspents, this.chain));
+    debug(` balance`, sumUnspents(this.unspents));
+    debug(` needsReset`, this.needsReset());
+    debug(` canSelfReset`, this.canSelfReset());
+    debug(` shouldRefund`, this.shouldRefund());
+  }
+}
+
 export class ManagedWallets {
   static async create(
     env: string,
@@ -118,9 +320,9 @@ export class ManagedWallets {
 
   private username: string;
   private password: string;
+  private chain: Timechain;
   private bitgo: any;
   private basecoin: any;
-  private chainhead: number;
   private walletList: BitGoWallet[];
   private wallets: Promise<BitGoWallet[]>;
   private faucet: BitGoWallet;
@@ -200,9 +402,9 @@ export class ManagedWallets {
     nock.cleanAll();
     nock.enableNetConnect();
     await this.bitgo.fetchConstants();
-    this.chainhead =
-      (await this.bitgo.get(this.basecoin.url('/public/block/latest')).result())
-        .height;
+
+    const { height } = await this.bitgo.get(this.basecoin.url('/public/block/latest')).result();
+    this.chain = new Timechain(height, this.network);
 
     const response = await this.bitgo.authenticate({
       username: this.username,
@@ -255,14 +457,6 @@ export class ManagedWallets {
     return this.walletUnspents.get(w);
   }
 
-  public getMaxSpendable(us: IUnspent[], recipients: string[], feeRate: number) {
-    return getMaxSpendable(
-      us,
-      recipients.map((a) => utxolib.address.toOutputScript(a, this.network)),
-      feeRate
-    );
-  }
-
   /**
    * Returns a wallet with given label. If wallet with label does not exist yet, create it.
    * @param allWallets
@@ -307,88 +501,10 @@ export class ManagedWallets {
     }
   }
 
-  private getWalletLimits(wallet: BitGoWallet): IWalletLimits {
-    const nMinTotal = codeGroups
-      .reduce((sum, codeGroup) => sum + this.walletConfig.getMinUnspents(codeGroup), 0);
-    const nResetTotal = nMinTotal * 2;
-
-    const minUnspentBalance = 0.001e8;
-    const resetUnspentBalance = minUnspentBalance * 2;
-    const minSelfResetBalance = nResetTotal * resetUnspentBalance * 1.1;
-    const maxTotalBalance = 2 * nResetTotal * resetUnspentBalance;
-
-    return {
-      minUnspentBalance,
-      resetUnspentBalance,
-      minSelfResetBalance,
-      maxTotalBalance
-    };
-  }
-
-  private getExcessUnspents(w, unspents: IUnspent[]): IUnspent[] {
-    const excessByCode = [Codes.p2sh, Codes.p2shP2wsh, Codes.p2wsh]
-      .map((codes) => {
-        const us = unspents.filter((u) => codes.has(u.chain));
-        const excessCount = this.walletConfig.getMaxUnspents(codes) - us.length;
-        return us.slice(0, excessCount);
-      });
-    return excessByCode.reduce((all, us) => [...all, ...us]);
-  }
-
-  private getRequiredUnspents(w: BitGoWallet, unspents: IUnspent[]): [ChainCode, number][] {
-    const limits = this.getWalletLimits(w);
-
-    return [Codes.p2sh, Codes.p2shP2wsh, Codes.p2wsh]
-      .map((codes: CodesByPurpose): [ChainCode, number] => {
-        const count = unspents
-          .filter((u) => u.value > limits.minUnspentBalance)
-          .filter((u) => codes.has(u.chain)).length;
-        const resetCount = (min, count) => (count >= min) ? 0 : 2 * min - count;
-        return [codes.external, resetCount(this.walletConfig.getMinUnspents(codes), count)];
-      });
-  }
-
-  private needsReset(w: BitGoWallet, unspents: IUnspent[]):
-    { excessBalance: boolean, excessUnspents: boolean, missingUnspent: boolean } | undefined {
-    const excessBalance =
-      sumUnspents(unspents) > this.getWalletLimits(w).maxTotalBalance;
-    const excessUnspents =
-      codeGroups.some((group) =>
-          unspents.filter(
-            (u) => group.has(u.chain)
-          ).length > this.walletConfig.getMaxUnspents(group)
-      );
-    const missingUnspent =
-      this.getRequiredUnspents(w, unspents).some(([code, count]) => count > 0);
-
-    debug(`needsReset ${w.label()}:`);
-    debug(` unspents=${this.dumpUnspents(unspents)}`);
-    debug(` ` + Object
-        .entries({ excessBalance, excessUnspents, missingUnspent })
-        .filter(([k, v]) => v)
-        .map(([k]) => k)
-        .join(',') || 'noResetRequired'
-    );
-
-    if (excessBalance || excessUnspents || missingUnspent) {
-      return { excessBalance, excessUnspents, missingUnspent };
-    }
-  }
-
-  private getConfirmations(u: IUnspent) {
-    return Math.max(0, this.chainhead - u.blockHeight + 1);
-  }
-
-  private isReady(w: BitGoWallet, unspents: IUnspent[]): boolean {
-    return this.getRequiredUnspents(
-      w, unspents.filter((u) => this.getConfirmations(u) > 2)
-    ).every(([code, count]) => count <= 0);
-  }
-
-  private dumpUnspents(unspents: IUnspent[]): string {
-    return unspents
-      .map((u) => `{chain=${u.chain},conf=${this.getConfirmations(u)}}`)
-      .join(',');
+  public async getAll(): Promise<ManagedWallet[]> {
+    return Promise.all((await this.wallets).map(
+      async (w) => new ManagedWallet(this.chain, this.walletConfig, w, await this.getUnspents(w))
+    ));
   }
 
   /**
@@ -396,21 +512,20 @@ export class ManagedWallets {
    * @param predicate - Callback with wallet as argument. Can return promise.
    * @return {*}
    */
-  async getNextWallet(predicate = (w: BitGoWallet, us: IUnspent[]) => true) {
+  async getNextWallet(predicate = (w: BitGoWallet, us: IUnspent[]) => true): Promise<BitGoWallet> {
     if (predicate !== undefined) {
       if (!_.isFunction(predicate)) {
         throw new Error(`condition must be function`);
       }
     }
 
-    let found;
+    let found: ManagedWallet | undefined;
     const stats = { nUsed: 0, nNeedsReset: 0, nNotReady: 0 };
 
-    for (const w of (await this.wallets)) {
-      const unspents = await this.getUnspents(w);
-      const isUsed = this.walletsUsed.has(w);
-      const needsReset = this.needsReset(w, unspents);
-      const notReady = !this.isReady(w, unspents);
+    for (const mw of await this.getAll()) {
+      const isUsed = mw.isUsed();
+      const needsReset = mw.needsReset();
+      const notReady = !mw.needsReset();
 
       stats.nUsed += isUsed ? 1 : 0;
       stats.nNeedsReset += needsReset ? 1 : 0;
@@ -421,17 +536,17 @@ export class ManagedWallets {
       }
 
       if (needsReset) {
-        debug(`skipping wallet ${w.label()}: needs reset`);
+        debug(`skipping wallet ${mw}: needs reset`);
         continue;
       }
 
       if (notReady) {
-        debug(`skipping wallet ${w.label()}: not ready`);
+        debug(`skipping wallet ${mw}: not ready`);
         continue;
       }
 
-      if (await Bluebird.resolve(predicate(w, unspents))) {
-        found = w;
+      if (await Bluebird.resolve(predicate(mw.wallet, mw.unspents))) {
+        found = mw;
         break;
       }
     }
@@ -443,9 +558,9 @@ export class ManagedWallets {
       );
     }
 
-    this.walletsUsed.add(found);
+    found.used = true;
 
-    return found;
+    return found.wallet;
   }
 
   async resetWallets() {
@@ -454,138 +569,55 @@ export class ManagedWallets {
       this.getUnspents(w, { cache: false });
     }
 
-    const wallets = await this.wallets;
-
-    const unspentMap = new Map(
-      await Promise.all(
-        wallets.map(async (w) => [w, await this.getUnspents(w)])
-      ) as [BitGoWallet, IUnspent[]][]
-    );
-
+    const managedWallets = await this.getAll();
     const faucetAddress = this.faucet.receiveAddress();
 
-    const canSelfReset = (w: BitGoWallet) =>
-      sumUnspents(unspentMap.get(w)) > this.getWalletLimits(w).minSelfResetBalance;
+    debug(`Checking reset for ${managedWallets.length} wallets:`);
+    managedWallets.forEach((mw) => mw.dump());
 
-    const shouldRefund = (w) =>
-      sumUnspents(unspentMap.get(w)) > this.getWalletLimits(w).maxTotalBalance;
-
-    const getResetRecipients = async (w: BitGoWallet, us: IUnspent[]) =>
-      (await Promise.all(this.getRequiredUnspents(w, us)
-        .map(async ([chain, count]) => {
-          if (count <= 0) {
-            return [];
-          }
-          return Promise.all(
-            Array(count).fill(0).map(
-              async () => {
-                const addr = await w.createAddress({ chain });
-                if (addr.chain !== chain) {
-                  throw new Error(`unexpected chain ${addr.chain}, expected ${chain}`);
-                }
-                return addr.address;
-              }
-            )
-          );
-        })
-      ))
-        .reduce((all, rs) => [...all, ...rs])
-        .map((address) => ({
-          address,
-          amount: this.getWalletLimits(w).resetUnspentBalance
-        }));
-
-    {
-      debug(`Checking reset for ${wallets.length} wallets:`);
-      wallets.forEach((w) => {
-        const unspents = unspentMap.get(w);
-        debug(`wallet ${w.label()}`);
-        debug(` unspents`, this.dumpUnspents(unspents));
-        debug(` balance`, sumUnspents(unspents));
-        debug(` needsReset`, this.needsReset(w, unspents));
-        debug(` canSelfReset`, canSelfReset(w));
-        debug(` shouldRefund`, shouldRefund(w));
-      });
-    }
-
-    const resetWallets = (await this.wallets)
-      .filter((w) => this.needsReset(w, unspentMap.get(w)));
-
-    const selfResetWallets = resetWallets.filter(canSelfReset);
-    const faucetResetWallets = resetWallets.filter((w) => !canSelfReset(w));
-    const excessUnspentWallets = faucetResetWallets
-      .filter((w) => this.needsReset(w, unspentMap.get(w)).excessUnspents);
+    const resetWallets = managedWallets.filter((mw) => mw.needsReset());
+    const selfResetWallets = resetWallets.filter((mw) => mw.canSelfReset());
+    const faucetResetWallets = resetWallets.filter((mw) => !mw.canSelfReset());
+    const excessUnspentWallets = faucetResetWallets.filter((mw) => mw.needsReset().excessUnspents);
 
     const resetErrors = [];
 
-    debug(`exec trySelfReset() for ${selfResetWallets.length} wallets...`);
-    const trySelfReset = async (w: BitGoWallet) => {
-      const recipients = await getResetRecipients(w, []);
-      if (recipients.length < 2) {
-        // we at least want two recipients so we can use one as the customChangeAddress
-        throw new Error(`insufficient resetRecipients`);
-      }
-      const changeAddress = shouldRefund(w) ? faucetAddress : recipients.pop().address;
-      return w.sendMany({
-        unspents: unspentMap.get(w).map((u) => u.id),
-        recipients,
-        changeAddress,
-        walletPassphrase: ManagedWallets.getPassphrase()
-      });
+    const runCollectErrors = async (tag: string, errors: Error[], promises: Promise<any>[]) => {
+      errors.push(...(
+        await Promise.all(promises.map(async (p): Promise<Error | null> => {
+          try {
+            await p;
+            return null;
+          } catch (e) {
+            e.message = `Error in ${tag}: ${e.message}`;
+            return e;
+          }
+        }))
+      ).filter((e) => e !== null))
     };
-    resetErrors.push(...(
-      await Promise.all(resetWallets.map(async (w) => {
-        try {
-          await trySelfReset(w);
-          return null;
-        } catch (e) {
-          return new Error(`Error in trySelfReset(${w.label()}): ${e}`);
-        }
-      }))).filter(e => e != null)
+
+    debug(`exec trySelfReset() for ${selfResetWallets.length} wallets...`);
+    runCollectErrors(
+      `trySelfReset`,
+      resetErrors,
+      resetWallets.map(mw => mw.trySelfReset(faucetAddress))
     );
 
-    debug(`spend excessUnspents ${excessUnspentWallets.length} wallets`);
-    const trySpendExcessUnspents = async (w: BitGoWallet) => {
-      const excessUnspents = this.getExcessUnspents(w, await this.getUnspents(w, { cache: false }));
-      if (excessUnspents.length === 0) {
-        return;
-      }
-      const feeRate = 10_000;
-      const amount = this.getMaxSpendable(excessUnspents, [faucetAddress], feeRate);
-      const { tx: txHex } = await w.sendMany({
-        feeRate,
-        unspents: excessUnspents.map(u => u.id),
-        recipients: [{ address: faucetAddress, amount }],
-        walletPassphrase: ManagedWallets.getPassphrase()
-      });
-      const parsedTx = utxolib.Transaction.fromHex(txHex, this.network);
-      if (parsedTx.outs.length !== 1) {
-        throw new Error(`unexpected change output`);
-      }
-      unspentMap.set(w, unspentMap.get(w).filter(u => !excessUnspents.includes(u)));
-    };
-    resetErrors.push(...(
-      await Promise.all(excessUnspentWallets.map(async (w) => {
-        try {
-          await trySpendExcessUnspents(w);
-          return null;
-        } catch (e) {
-          return new Error(`error in spendExcessUnspents(${w.label()}): ${e}`);
-        }
-      }))).filter(e => e !== null)
+    debug(`spend excessUnspents ${excessUnspentWallets.length} wallets...`);
+    runCollectErrors(
+      `trySpendExcessUnspents`,
+      resetErrors,
+      resetWallets.map(mw => mw.trySpendExcessUnspents(faucetAddress))
     );
 
     const faucetRecipients =
-      (await Promise.all(
-        faucetResetWallets.map(
-          (w) => getResetRecipients(w, unspentMap.get(w)))
-        )
-      ).map((rs, i) => {
-        if (rs.length === 0) {
-          resetErrors.push(new Error(`empty faucetRecipients for ${ faucetResetWallets[i].label()}`))
-        }
-        return rs;
-      })
+      (await Promise.all(faucetResetWallets.map(mw => mw.getResetRecipients(faucetAddress))))
+        .map((rs: IRecipient[], i) => {
+          if (rs.length === 0) {
+            resetErrors.push(new Error(`empty faucetRecipients for ${faucetResetWallets[i]}`))
+          }
+          return rs;
+        })
       .reduce((all, rs) => [...all, ...rs], []);
 
     const faucetBalance = this.faucet.balance();
