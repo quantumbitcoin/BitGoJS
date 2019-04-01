@@ -513,15 +513,10 @@ export class ManagedWallets {
    * @param label
    * @return {*}
    */
-  private async getOrCreateWallet(
-    label: string, { create = true }: { create?: boolean } = {},
-  ): Promise<BitGoWallet> {
+  private async getOrCreateWallet(label: string): Promise<BitGoWallet> {
     const walletsWithLabel = this.walletList
       .filter(w => w.label() === label);
     if (walletsWithLabel.length < 1) {
-      if (!create) {
-        throw new Error(`no wallet with label ${label} and create=${create}`);
-      }
       debug(`no wallet with label ${label} - creating new wallet...`);
       const { wallet } = await this.basecoin.wallets().generateWallet({
         label,
