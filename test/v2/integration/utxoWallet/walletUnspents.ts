@@ -2,7 +2,14 @@
 // Tests for Wallets
 //
 
-import {CodeGroup, IWalletConfig, ManagedWallets, sumUnspents} from "./ManagedWallets";
+import {
+  CodeGroup,
+  GroupPureP2sh,
+  GroupPureP2shP2wsh, GroupPureP2wsh,
+  IWalletConfig,
+  ManagedWallets,
+  sumUnspents
+} from "./ManagedWallets";
 
 import 'should';
 
@@ -26,13 +33,13 @@ const skipTest = (groupName) => {
   return (groups !== undefined) && !groups.split(',').includes(groupName);
 };
 
-const runTests = (groupName: string, walletConfig: IWalletConfig) => {
+const runTests = (walletConfig: IWalletConfig) => {
   let testWallets: ManagedWallets;
 
   const env = process.env.BITGO_ENV || 'test';
-  describe(`Wallets env=${env} group=${groupName}`, function () {
-    if (skipTest(groupName)) {
-      console.log(`skipping ${groupName}`);
+  describe(`Wallets env=${env} group=${walletConfig.name}`, function () {
+    if (skipTest(walletConfig.name)) {
+      console.log(`skipping ${walletConfig.name}`);
       return;
     }
 
@@ -41,7 +48,6 @@ const runTests = (groupName: string, walletConfig: IWalletConfig) => {
       testWallets = await ManagedWallets.create(
         env,
         'otto+e2e-utxowallets@bitgo.com',
-        groupName,
         walletConfig,
       );
     });
@@ -141,16 +147,7 @@ const runTests = (groupName: string, walletConfig: IWalletConfig) => {
 };
 
 describe('Unspent Manipulation', function() {
-  const makeConfig = (allowedGroups: CodeGroup[]): IWalletConfig => ({
-    getMinUnspents(c: CodeGroup): number {
-      return allowedGroups.includes(c) ? 2 : 0;
-    },
-    getMaxUnspents(c: CodeGroup): number {
-      return allowedGroups.includes(c) ? Infinity : 0;
-    }
-  });
-
-  runTests(`pure-p2sh`, makeConfig([Codes.p2sh]));
-  runTests(`pure-p2shP2wsh`, makeConfig([Codes.p2shP2wsh]));
-  runTests(`pure-p2wsh`, makeConfig([Codes.p2wsh]));
+  runTests(GroupPureP2sh);
+  runTests(GroupPureP2shP2wsh);
+  runTests(GroupPureP2wsh);
 });
