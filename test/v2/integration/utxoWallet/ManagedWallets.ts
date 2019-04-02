@@ -105,7 +105,6 @@ const dumpUnspents = (unspents: IUnspent[], chain: Timechain, { value = false } 
 
 const runCollectErrors = async <T>(
   items: T[],
-  funcName: string,
   func: (v: T) => Promise<any>
 ): Promise<Error[]> =>
   (
@@ -624,7 +623,6 @@ export class ManagedWallets {
     debug(`deleting ${deleteWallets.length} wallets`);
     const deleteErrors = await runCollectErrors(
       deleteWallets,
-      'delete',
       (w) => this.bitgo.del(this.basecoin.url('/wallet/' + w.id()))
     );
     deleteErrors.forEach((e) => console.error(e));
@@ -633,7 +631,6 @@ export class ManagedWallets {
     debug(`sweeping ${sweepWallets.length} wallets`);
     const sweepErrors = await runCollectErrors(
       sweepWallets,
-      'removeOrDelete',
       (w) =>
         w.sweep({
           feeRate: 1000,
@@ -675,14 +672,12 @@ export class ManagedWallets {
     debug(`exec trySelfReset() for ${selfResetWallets.length} wallets...`);
     resetErrors.push(...await runCollectErrors(
       selfResetWallets,
-      `trySelfReset`,
       (mw) => mw.trySelfReset(faucetAddress)
     ));
 
     debug(`spend excessUnspents ${excessUnspentWallets.length} wallets...`);
     resetErrors.push(...await runCollectErrors(
       excessUnspentWallets,
-      `trySpendExcessUnspents`,
       (mw) => mw.trySpendExcessUnspents(faucetAddress)
     ));
 
