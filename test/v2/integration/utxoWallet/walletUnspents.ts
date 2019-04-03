@@ -69,7 +69,7 @@ const runTests = (walletConfig: IWalletConfig) => {
     it('should consolidate the number of unspents to 2', async function () {
       this.timeout(60_000);
 
-      const wallet = await testWallets.getNextWallet((w, unspents) => unspents.length > 4);
+      const wallet = await testWallets.getNextWallet((w, unspents) => unspents.length >= 4);
 
       const transaction = await wallet.consolidateUnspents({
         limit: 250,

@@ -15,6 +15,32 @@ import * as BitGo from '../../../../src/bitgo';
 
 const concurrencyBitGoApi = 4;
 
+const chainGroups = [Codes.p2sh, Codes.p2shP2wsh, Codes.p2wsh];
+
+class DryFaucetError extends Error {
+  constructor(faucetWallet: BitGoWallet, spendAmount) {
+    super(
+      `Faucet has run dry ` +
+      `[faucetBalance=${faucetWallet.balance()}, ` +
+      `spendable=${faucetWallet.spendableBalance()}, ` +
+      `sendAmount=${spendAmount}].`
+    + `Please deposit tbtc at ${faucetWallet.receiveAddress()}.`
+    )
+  }
+}
+
+class ErrorExcessSendAmount extends Error {
+  constructor(wallet: BitGoWallet, spendAmount) {
+    super(
+      `Invalid recipients: Receive amount exceeds wallet balance: ` +
+      `[wallet=${wallet.label()},`+
+      `balance=${wallet.balance()}, ` +
+      `spendable=${wallet.spendableBalance()}, ` +
+      `sendAmount=${spendAmount}].`
+    );
+  }
+}
+
 export type BitGoWallet = any;
 
 export interface IUnspent {
@@ -73,9 +99,14 @@ export interface IWalletConfig {
 
 export interface IWalletLimits {
   minUnspentBalance: number;
+  maxUnspentBalance: number;
   resetUnspentBalance: number;
-  minSelfResetBalance: number;
-  maxTotalBalance: number;
+}
+
+export interface ISend {
+  source: BitGoWallet;
+  unspents?: string[];
+  recipients: IRecipient[];
 }
 
 const codeGroups = [Codes.p2sh, Codes.p2shP2wsh, Codes.p2wsh];
@@ -87,15 +118,25 @@ const getDimensions = (unspents: IUnspent[], outputScripts: Buffer[]): IDimensio
     ));
 
 const getMaxSpendable = (unspents: IUnspent[], outputScripts: Buffer[], feeRate: number) => {
+  if (unspents.length === 0) {
+    throw new Error(`must provide at least one unspent`);
+  }
   const cost = getDimensions(unspents, outputScripts).getVSize() * feeRate / 1000;
-  return Math.floor(sumUnspents(unspents) - cost);
+  const amount = Math.floor(sumUnspents(unspents) - cost);
+  if (amount < 1000) {
+    throw new Error(
+      `unspendable unspents ${dumpUnspents(unspents, null, { value: true })} ` +
+      `at feeRate=${feeRate}: ${amount}`
+    );
+  }
+  return amount;
 };
 
-const dumpUnspents = (unspents: IUnspent[], chain: Timechain, { value = false } = {}): string =>
+const dumpUnspents = (unspents: IUnspent[], chain?: Timechain, { value = false } = {}): string =>
   unspents
     .map((u) => ({
       chain: u.chain,
-      conf: chain.getConfirmations(u),
+      conf: chain ? chain.getConfirmations(u) : undefined,
       ...(value ? { value: u.value } : {})
     }))
     .map((obj) =>
@@ -159,15 +200,12 @@ export class ManagedWallet {
     const nResetTotal = nMinTotal * 2;
 
     const minUnspentBalance = 0.001e8;
+    const maxUnspentBalance = minUnspentBalance * 4;
     const resetUnspentBalance = minUnspentBalance * 2;
-    const minSelfResetBalance = nResetTotal * resetUnspentBalance * 1.1;
-    const maxTotalBalance = 2 * nResetTotal * resetUnspentBalance;
-
     return {
       minUnspentBalance,
+      maxUnspentBalance,
       resetUnspentBalance,
-      minSelfResetBalance,
-      maxTotalBalance
     };
   }
 
@@ -185,24 +223,6 @@ export class ManagedWallet {
     ).every(([code, count]) => count <= 0);
   }
 
-  public canSelfReset(): boolean {
-    return sumUnspents(this.unspents) > this.getWalletLimits().minSelfResetBalance;
-  }
-
-  public shouldRefund(): boolean {
-    return sumUnspents(this.unspents) > this.getWalletLimits().maxTotalBalance;
-  }
-
-  private getExcessUnspents(unspents: IUnspent[]): IUnspent[] {
-    const excessByCode = [Codes.p2sh, Codes.p2shP2wsh, Codes.p2wsh]
-      .map((codes) => {
-        const us = unspents.filter((u) => codes.has(u.chain));
-        const excessCount = this.walletConfig.getMaxUnspents(codes) - us.length;
-        return us.slice(0, excessCount);
-      });
-    return excessByCode.reduce((all, us) => [...all, ...us]);
-  }
-
   private async getAddress({ chain }) {
     let addr = this.addresses.find((a) => a.chain === chain);
     if (addr) {
@@ -213,7 +233,65 @@ export class ManagedWallet {
     if (addr.chain !== chain) {
       throw new Error(`unexpected chain ${addr.chain}, expected ${chain}`);
     }
+    this.addresses.push(addr);
     return addr;
+  }
+
+  private getAllowedUnspents(unspents: IUnspent[]): IUnspent[] {
+    const valueInRange = (value) =>
+      (this.getWalletLimits().minUnspentBalance < value) && (value < this.getWalletLimits().maxUnspentBalance);
+
+    return chainGroups
+        .map((grp) =>
+          unspents
+            .filter((u) => grp.has(u.chain) && valueInRange(u.value))
+            .slice(0, this.walletConfig.getMaxUnspents(grp))
+        )
+        .reduce((all, us) => [...all, ...us]);
+  }
+
+  private getExcessUnspents(unspents: IUnspent[]): IUnspent[] {
+    const allowedUnspents = this.getAllowedUnspents(unspents);
+    return unspents.filter((u) => !allowedUnspents.includes(u));
+  }
+
+  public getRequiredUnspents(unspents: IUnspent[]): [ChainCode, number][] {
+    const limits = this.getWalletLimits();
+
+    const allowedUnspents = this.getAllowedUnspents(unspents);
+
+    return [Codes.p2sh, Codes.p2shP2wsh, Codes.p2wsh]
+      .map((codes: CodesByPurpose): [ChainCode, number] => {
+        const count = allowedUnspents
+          .filter((u) => u.value > limits.minUnspentBalance)
+          .filter((u) => codes.has(u.chain)).length;
+        const resetCount = (min, count) => (count >= min) ? 0 : 2 * min - count;
+        return [codes.external, resetCount(this.walletConfig.getMinUnspents(codes), count)];
+      });
+  }
+
+  public needsReset(): { excessUnspents: boolean, missingUnspents: boolean } | undefined {
+    const excessUnspents = this.getExcessUnspents(this.unspents);
+    const missingUnspents = this.getRequiredUnspents(this.unspents)
+      .filter(([code, count]) => count > 0);
+
+    const hasExcessUnspents = excessUnspents.length > 0;
+    const hasMissingUnspent = missingUnspents.length > 0;
+
+    const needsReset = hasExcessUnspents || hasMissingUnspent;
+
+    debug(`needsReset ${this.wallet.label()}=${needsReset}`);
+    debug(` unspents=${dumpUnspents(this.unspents, this.chain)}`);
+    debug(` allowedUnspents=${dumpUnspents(this.getAllowedUnspents(this.unspents), this.chain)}`);
+    debug(` excessUnspents=${dumpUnspents(excessUnspents, this.chain)}`);
+    debug(` missingUnspents=${missingUnspents.map(([code, count]) => `code=${code},count=${count}`)}`);
+
+    if (needsReset) {
+      return {
+        excessUnspents: hasMissingUnspent,
+        missingUnspents: hasMissingUnspent
+      };
+    }
   }
 
   public async getResetRecipients(us: IUnspent[]): Promise<IRecipient[]> {
@@ -236,77 +314,35 @@ export class ManagedWallet {
       }));
   }
 
-  public getRequiredUnspents(unspents: IUnspent[]): [ChainCode, number][] {
-    const limits = this.getWalletLimits();
-
-    return [Codes.p2sh, Codes.p2shP2wsh, Codes.p2wsh]
-      .map((codes: CodesByPurpose): [ChainCode, number] => {
-        const count = unspents
-          .filter((u) => u.value > limits.minUnspentBalance)
-          .filter((u) => codes.has(u.chain)).length;
-        const resetCount = (min, count) => (count >= min) ? 0 : 2 * min - count;
-        return [codes.external, resetCount(this.walletConfig.getMinUnspents(codes), count)];
-      });
-  }
-
-  public needsReset(): { excessBalance: boolean, excessUnspents: boolean, missingUnspent: boolean } | undefined {
-    const excessBalance = sumUnspents(this.unspents) > this.getWalletLimits().maxTotalBalance;
-    const excessUnspents =
-      codeGroups.some((group) =>
-        this.unspents.filter((u) => group.has(u.chain)).length > this.walletConfig.getMaxUnspents(group)
-      );
-    const missingUnspent =
-      this.getRequiredUnspents(this.unspents).some(([code, count]) => count > 0);
-
-    debug(`needsReset ${this.wallet.label()}:`);
-    debug(` unspents=${dumpUnspents(this.unspents, this.chain)}`);
-    debug(` ` + Object
-      .entries({ excessBalance, excessUnspents, missingUnspent })
-      .filter(([k, v]) => v)
-      .map(([k]) => k)
-      .join(',') || 'noResetRequired'
-    );
-
-    if (excessBalance || excessUnspents || missingUnspent) {
-      return { excessBalance, excessUnspents, missingUnspent };
+  /**
+   * List of source-target pairs
+   */
+  public async getSends(faucet: ManagedWallet, feeRate: number): Promise<ISend[]> {
+    if (!this.needsReset()) {
+      return [];
     }
-  }
+    const sends = [];
+    const faucetAddress = (await faucet.getAddress({ chain: 20 })).address;
 
-  public async trySelfReset(faucetAddress: string) {
-    const recipients = await this.getResetRecipients([]);
-    if (recipients.length < 2) {
-      // we at least want two recipients so we can use one as the customChangeAddress
-      throw new Error(`insufficient resetRecipients`);
-    }
-    const feeRate = 20_000;
-    const changeAddress = this.shouldRefund() ? faucetAddress : recipients.pop().address;
-    this.wallet.sendMany({
-      feeRate,
-      unspents: this.unspents.map((u) => u.id),
-      recipients,
-      changeAddress,
-      walletPassphrase: ManagedWallets.getPassphrase()
-    });
-  }
-
-  public async trySpendExcessUnspents(faucetAddress: string) {
     const excessUnspents = this.getExcessUnspents(this.unspents);
-    if (excessUnspents.length === 0) {
-      return;
+    if (excessUnspents.length > 0) {
+      const refundAmount = this.chain.getMaxSpendable(excessUnspents, [faucetAddress], feeRate);
+      sends.push({
+        source: this.wallet,
+        unspents: excessUnspents.map((u) => u.id),
+        recipients: [{ address: faucetAddress, amount: refundAmount }],
+      });
     }
-    const feeRate = 20_000;
-    const amount = this.chain.getMaxSpendable(excessUnspents, [faucetAddress], feeRate);
-    const { tx: txHex } = await this.wallet.sendMany({
-      feeRate,
-      unspents: excessUnspents.map(u => u.id),
-      recipients: [{ address: faucetAddress, amount }],
-      walletPassphrase: ManagedWallets.getPassphrase()
-    });
-    const parsedTx = this.chain.parseTx(txHex);
-    if (parsedTx.outs.length !== 1) {
-      throw new Error(`unexpected change output`);
+
+    const resetRecipients = await this.getResetRecipients(this.unspents);
+    if (resetRecipients.length > 0) {
+      sends.push({
+        source: faucet.wallet,
+        recipients: resetRecipients
+      });
     }
-    this.unspents = (await this.wallet.unspents()).unspents;
+
+    return sends;
   }
 
   public toString(): string {
@@ -318,8 +354,6 @@ export class ManagedWallet {
     debug(` unspents`, dumpUnspents(this.unspents, this.chain));
     debug(` balance`, sumUnspents(this.unspents));
     debug(` needsReset`, this.needsReset());
-    debug(` canSelfReset`, this.canSelfReset());
-    debug(` shouldRefund`, this.shouldRefund());
   }
 }
 
@@ -330,7 +364,8 @@ export class ManagedWallets {
     env: string,
     clientId: string,
     walletConfig: IWalletConfig,
-    poolSize: number = 32
+    poolSize: number = 32,
+    { dryRun = false }: { dryRun?: boolean } = {}
   ): Promise<ManagedWallets> {
     const envPoolSize = 'BITGOJS_MW_POOL_SIZE';
     if (envPoolSize in process.env) {
@@ -344,7 +379,8 @@ export class ManagedWallets {
       env,
       username: clientId,
       walletConfig,
-      poolSize
+      poolSize,
+      dryRun,
     })).init();
   }
 
@@ -378,6 +414,7 @@ export class ManagedWallets {
   private walletConfig: IWalletConfig;
   private poolSize: number;
   private labelPrefix: string;
+  private dryRun: boolean;
 
   /**
    * Because we need an async operation to be ready, please use
@@ -389,16 +426,21 @@ export class ManagedWallets {
       username,
       walletConfig,
       poolSize,
+      dryRun,
     }: {
       env: string,
       username: string,
       walletConfig: IWalletConfig,
       poolSize: number,
+      dryRun: boolean,
   }) {
     if (!['test', 'dev'].includes(env)) {
       throw new Error(`unsupported env "${env}"`);
     }
     this.password = process.env.BITGOJS_TEST_PASSWORD;
+    if (!this.password) {
+      throw new Error(`envvar not set: BITGOJS_TEST_PASSWORD`);
+    }
     this.username = username;
     // @ts-ignore
     this.bitgo = new BitGo({ env });
@@ -406,6 +448,7 @@ export class ManagedWallets {
     this.poolSize = poolSize;
     this.walletConfig = walletConfig;
     this.labelPrefix = `managed/${walletConfig.name}`;
+    this.dryRun = dryRun;
 
     if ('after' in global) {
       const mw = this;
@@ -460,13 +503,11 @@ export class ManagedWallets {
 
     this.faucet = await this.getOrCreateWallet('managed-faucet');
 
-    this.wallets = Promise.all(
-      Array(this.poolSize)
-        .fill(null)
-        .map((v, i) => this.getOrCreateWallet(
-          this.getLabelForIndex(i)
-        ))
-    );
+    this.wallets = (async () => await Bluebird.map(
+      Array(this.poolSize).fill(null).map((v, i) => i),
+      (i) => this.getOrCreateWallet(this.getLabelForIndex(i)),
+      { concurrency: 4 }
+    ))();
 
     return this;
   }
@@ -488,15 +529,15 @@ export class ManagedWallets {
 
   public async getAddresses(w: BitGoWallet, { cache = true }: { cache?: boolean } = {}): Promise<IAddress[]> {
     if (!this.walletAddresses.has(w) || !cache) {
-      this.walletAddresses.set(w, (async (): Promise<IAddress[]> => {
-        const res = await w.addresses({ limit: 100 });
-        if (res.nextBatchPrevId) {
-          throw new Error(`excess addresses`);
-        }
-        return res.addresses;
-      })());
+      this.walletAddresses.set(w, (async (): Promise<IAddress[]> =>
+        (await Bluebird.map(
+          chainGroups,
+          async (group) => (await w.addresses({ limit: 100, chains: group.values })).addresses,
+          { concurrency: 2 }
+        )).reduce((all, addrs) => [...all, ...addrs])
+      )());
     }
-    return this.walletUnspents.get(w);
+    return this.walletAddresses.get(w);
   }
 
   public async getUnspents(w: BitGoWallet, { cache = true }: { cache?: boolean } = {}): Promise<IUnspent[]> {
@@ -517,6 +558,9 @@ export class ManagedWallets {
       .filter(w => w.label() === label);
     if (walletsWithLabel.length < 1) {
       debug(`no wallet with label ${label} - creating new wallet...`);
+      if (this.dryRun) {
+        throw new Error(`not creating new wallet (dryRun=true)`);
+      }
       const { wallet } = await this.basecoin.wallets().generateWallet({
         label,
         passphrase: ManagedWallets.getPassphrase(),
@@ -555,7 +599,7 @@ export class ManagedWallets {
    * @param predicate - Callback with wallet as argument. Can return promise.
    * @return {*}
    */
-  async getNextWallet(predicate: ManagedWalletPredicate = () => true): Promise<BitGoWallet> {
+  async getNextWallet(predicate?: ManagedWalletPredicate): Promise<BitGoWallet> {
     if (predicate !== undefined) {
       if (!_.isFunction(predicate)) {
         throw new Error(`condition must be function`);
@@ -588,7 +632,7 @@ export class ManagedWallets {
         continue;
       }
 
-      if (await Bluebird.resolve(predicate(mw.wallet, mw.unspents))) {
+      if (predicate === undefined || (await Bluebird.resolve(predicate(mw.wallet, mw.unspents)))) {
         found = mw;
         break;
       }
@@ -597,7 +641,12 @@ export class ManagedWallets {
     if (found === undefined) {
       throw new Error(
         `No wallet matching criteria found ` +
-      `(nUsed=${stats.nUsed},nNeedsReset=${stats.nNeedsReset},nNotReady=${stats.nNotReady})`
+      `(`
+        + `nUsed=${stats.nUsed},`
+        + `nNeedsReset=${stats.nNeedsReset},`
+        + `nNotReady=${stats.nNotReady},`
+        + `predicate=${predicate}`
+        +`)`
       );
     }
 
@@ -652,82 +701,80 @@ export class ManagedWallets {
     // refresh unspents of used wallets
     for (const mw of await this.getAll()) {
       if (mw.isUsed()) {
-        this.getUnspents(mw.wallet, { cache: false });
+        this.getUnspents(mw.wallet, {cache: false});
       }
     }
 
     const managedWallets = await this.getAll();
-    const faucetAddress = this.faucet.receiveAddress();
+    const faucet = this.faucet;
+    const managedFaucet = new ManagedWallet(
+      this.usedWallets,
+      this.chain,
+      this.walletConfig,
+      faucet,
+      await this.getUnspents(faucet),
+      await this.getAddresses(faucet)
+    );
 
     debug(`Checking reset for ${managedWallets.length} wallets:`);
     managedWallets.forEach((mw) => mw.dump());
 
-    const resetWallets = managedWallets.filter((mw) => mw.needsReset());
-    const selfResetWallets = resetWallets.filter((mw) => mw.canSelfReset());
-    const faucetResetWallets = resetWallets.filter((mw) => !mw.canSelfReset());
-    const excessUnspentWallets = faucetResetWallets.filter((mw) => mw.needsReset().excessUnspents);
+    const feeRate = 10_000;
+    const sends = await Promise.all(managedWallets.map((m) => m.getSends(managedFaucet, feeRate)));
+    const sendsByWallet: Map<BitGoWallet, ISend[]> = sends
+      .reduce((all, sends) => [...all, ...sends], [])
+      .reduce((map, send: ISend) => {
+      const sds = map.get(send.source) || [];
+      map.set(send.source, [...sds, send]);
+      return map;
+    }, new Map());
 
-    const resetErrors = [];
-
-    debug(`exec trySelfReset() for ${selfResetWallets.length} wallets...`);
-    resetErrors.push(...await runCollectErrors(
-      selfResetWallets,
-      (mw) => mw.trySelfReset(faucetAddress)
-    ));
-
-    debug(`spend excessUnspents ${excessUnspentWallets.length} wallets...`);
-    resetErrors.push(...await runCollectErrors(
-      excessUnspentWallets,
-      (mw) => mw.trySpendExcessUnspents(faucetAddress)
-    ));
-
-    const faucetRecipients =
-      (await Bluebird.map(
-        faucetResetWallets,
-        mw => mw.getResetRecipients(mw.unspents),
-        { concurrency: concurrencyBitGoApi }
-      ))
-      .map((rs: IRecipient[], i) => {
-        if (rs.length === 0) {
-          resetErrors.push(new Error(`empty faucetRecipients for ${faucetResetWallets[i]}`))
-        }
-        return rs;
-      })
-      .reduce((all, rs) => [...all, ...rs], []);
-
-    const faucetBalance = this.faucet.balance();
-
-    const fundableRecipients = [];
-    let sum;
-    faucetRecipients.every((r) => {
-      if (sum += r.amount > faucetBalance) {
-        return false;
-      }
-      fundableRecipients.push(r);
-      return true;
+    sendsByWallet.forEach((sends, wallet) => {
+      debug(`${wallet.label()} ->`);
+      sends.forEach((send) => {
+        send.recipients.forEach((r) => { debug(`  ${r.address} ${r.amount}`); });
+      });
     });
 
-    debug(`fund ${fundableRecipients.length} recipients...`);
-    if (fundableRecipients.length > 0) {
-      const feeRate = 20_000;
-      await this.faucet.sendMany({
-        feeRate,
-        recipients: fundableRecipients,
-        walletPassphrase: ManagedWallets.getPassphrase(),
-      });
-    }
+    runCollectErrors(
+      [...sendsByWallet.entries()],
+      async ([w, sends]) => {
+        if (sends.length === 0) {
+          throw new Error(`no sends for ${w}`)
+        }
 
-    if (fundableRecipients.length < faucetRecipients.length) {
-      resetErrors.push(new Error(
-        `Faucet has run dry (faucetBalance=${faucetBalance}) `
-        + `Please deposit tbtc at ${faucetAddress}`
-      ));
-    }
+        let unspents;
+        if (sends.length === 1) {
+          unspents = sends[0].unspents;
+        } else {
+          if (!sends.every(({ unspents }) => unspents === undefined)) {
+            throw new Error(`cannot declare unspent in send with more than one send per wallet`);
+          }
+        }
 
-    if (resetErrors.length > 0) {
-      resetErrors.forEach((e, i) => console.error(`Error ${i}:`, e));
-      throw new Error(`There were ${resetErrors.length} reset errors. See log for details.`);
-    }
+        const recipients =
+          sends.reduce((rs, s: ISend) => [...rs, ...s.recipients], []);
+
+        const sum = recipients.reduce((sum, v) => sum + v.amount, 0);
+        if (sum > w.spendableBalance()) {
+          if (w === faucet) {
+            throw new DryFaucetError(faucet, sum);
+          }
+          throw new ErrorExcessSendAmount(w, sum);
+        }
+
+        if (this.dryRun) {
+          console.warn(`dryRun set: skipping sendMany for ${w.label()}`);
+          return;
+        }
+        await w.sendMany({
+          feeRate,
+          unspents,
+          recipients,
+          walletPassphrase: ManagedWallets.getPassphrase(),
+        });
+      }
+    );
   }
 }
 
@@ -747,7 +794,8 @@ export const GroupPureP2shP2wsh = makeConfigSingleGroup('pure-p2shP2wsh', [Codes
 export const GroupPureP2wsh = makeConfigSingleGroup('pure-p2wsh', [Codes.p2wsh]);
 
 const main = async () => {
-  debugLib.enable('ManagedWallets,bitgo:*,superagent:*');
+  // debugLib.enable('ManagedWallets,bitgo:*,superagent:*');
+  debugLib.enable('ManagedWallets');
 
   const { ArgumentParser } = require('argparse');
   const parser = new ArgumentParser();
@@ -756,8 +804,9 @@ const main = async () => {
   parser.addArgument(['--poolSize'], { required: true, type: Number });
   parser.addArgument(['--group'], { required: true });
   parser.addArgument(['--cleanup'], { nargs: 0 });
+  parser.addArgument(['--dryRun'], { nargs: 0 });
   parser.addArgument(['--reset'], { nargs: 0 });
-  const { env, poolSize, group: groupName, cleanup, reset } = parser.parseArgs();
+  const { env, poolSize, group: groupName, cleanup, reset, dryRun } = parser.parseArgs();
   const walletConfig = [GroupPureP2sh, GroupPureP2shP2wsh, GroupPureP2wsh]
     .find(({ name }) => name === groupName);
   if (!walletConfig) {
@@ -767,7 +816,8 @@ const main = async () => {
     env,
     clientId,
     walletConfig,
-    cleanup ? 0 : poolSize
+    cleanup ? 0 : poolSize,
+    { dryRun }
   );
 
   if ([cleanup, reset].filter(Boolean).length !== 1) {
