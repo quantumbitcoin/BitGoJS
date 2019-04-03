@@ -154,7 +154,7 @@ const runCollectErrors = async <T>(
         await func(v);
         return null;
       } catch (e) {
-        console.error(`Error for ${v}`, e);
+        console.error(e);
         return e;
       }
     }, { concurrency: concurrencyBitGoApi })
