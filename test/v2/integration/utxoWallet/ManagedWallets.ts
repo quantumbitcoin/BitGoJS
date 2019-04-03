@@ -736,7 +736,7 @@ export class ManagedWallets {
       });
     });
 
-    runCollectErrors(
+    await runCollectErrors(
       [...sendsByWallet.entries()],
       async ([w, sends]) => {
         if (sends.length === 0) {
