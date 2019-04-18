@@ -6,7 +6,7 @@ import {
   GroupPureP2sh,
   GroupPureP2shP2wsh,
   GroupPureP2wsh,
-  IWalletConfig,
+  WalletConfig,
   ManagedWallets
 } from './ManagedWallets';
 
@@ -30,7 +30,7 @@ const skipTest = (groupName) => {
   return (groups !== undefined) && !groups.split(',').includes(groupName);
 };
 
-const runTests = (walletConfig: IWalletConfig) => {
+const runTests = (walletConfig: WalletConfig) => {
   let testWallets: ManagedWallets;
 
   const env = process.env.BITGO_ENV || 'test';

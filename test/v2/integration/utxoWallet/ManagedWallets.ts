@@ -5,7 +5,7 @@ Bluebird.longStackTraces();
 
 import * as nock from 'nock';
 
-import {Codes, Dimensions, IDimensions} from '@bitgo/unspents';
+import { Codes, Dimensions, IDimensions } from '@bitgo/unspents';
 
 import debugLib from 'debug';
 const debug = debugLib('ManagedWallets');
@@ -25,7 +25,7 @@ class DryFaucetError extends Error {
       `spendable=${faucetWallet.spendableBalance()}, ` +
       `sendAmount=${spendAmount}].`
     + `Please deposit tbtc at ${faucetWallet.receiveAddress()}.`
-    )
+    );
   }
 }
 
@@ -33,7 +33,7 @@ class ErrorExcessSendAmount extends Error {
   constructor(wallet: BitGoWallet, spendAmount) {
     super(
       `Invalid recipients: Receive amount exceeds wallet balance: ` +
-      `[wallet=${wallet.label()},`+
+      `[wallet=${wallet.label()},` +
       `balance=${wallet.balance()}, ` +
       `spendable=${wallet.spendableBalance()}, ` +
       `sendAmount=${spendAmount}].`
@@ -43,7 +43,7 @@ class ErrorExcessSendAmount extends Error {
 
 export type BitGoWallet = any;
 
-export interface IUnspent {
+export interface Unspent {
   id: string;
   address: string;
   value: number;
@@ -57,12 +57,12 @@ export interface IUnspent {
   isSegwit: boolean;
 }
 
-export interface IAddress {
+export interface Address {
   address: string;
   chain: number;
 }
 
-export interface IRecipient {
+export interface Recipient {
   address: string;
   amount: number;
 }
@@ -70,9 +70,9 @@ export interface IRecipient {
 export declare type ChainCode = number;
 
 enum UnspentType {
-  p2sh = "p2sh",
-  p2shP2wsh = "p2shP2wsh",
-  p2wsh = "p2wsh"
+  p2sh = 'p2sh',
+  p2shP2wsh = 'p2shP2wsh',
+  p2wsh = 'p2wsh'
 }
 
 export declare class CodeGroup {
@@ -87,37 +87,37 @@ export declare class CodesByPurpose extends CodeGroup {
   constructor(t: UnspentType);
 }
 
-export const sumUnspents = (us: IUnspent[]) =>
+export const sumUnspents = (us: Unspent[]) =>
   us.reduce((sum, u) => sum + u.value, 0);
 
 
-export interface IWalletConfig {
+export interface WalletConfig {
   name: string;
   getMinUnspents(c: CodeGroup): number;
   getMaxUnspents(c: CodeGroup): number;
 }
 
-export interface IWalletLimits {
+export interface WalletLimits {
   minUnspentBalance: number;
   maxUnspentBalance: number;
   resetUnspentBalance: number;
 }
 
-export interface ISend {
+export interface Send {
   source: BitGoWallet;
   unspents?: string[];
-  recipients: IRecipient[];
+  recipients: Recipient[];
 }
 
 const codeGroups = [Codes.p2sh, Codes.p2shP2wsh, Codes.p2wsh];
 
-const getDimensions = (unspents: IUnspent[], outputScripts: Buffer[]): IDimensions =>
+const getDimensions = (unspents: Unspent[], outputScripts: Buffer[]): IDimensions =>
   Dimensions.fromUnspents(unspents)
-    .plus(Dimensions.sum(
-      ...outputScripts.map((s) => Dimensions.fromOutputScriptLength(s.length))
-    ));
+  .plus(Dimensions.sum(
+    ...outputScripts.map((s) => Dimensions.fromOutputScriptLength(s.length))
+  ));
 
-const getMaxSpendable = (unspents: IUnspent[], outputScripts: Buffer[], feeRate: number) => {
+const getMaxSpendable = (unspents: Unspent[], outputScripts: Buffer[], feeRate: number) => {
   if (unspents.length === 0) {
     throw new Error(`must provide at least one unspent`);
   }
@@ -132,24 +132,24 @@ const getMaxSpendable = (unspents: IUnspent[], outputScripts: Buffer[], feeRate:
   return amount;
 };
 
-const dumpUnspents = (unspents: IUnspent[], chain?: Timechain, { value = false } = {}): string =>
+const dumpUnspents = (unspents: Unspent[], chain?: Timechain, { value = false } = {}): string =>
   unspents
-    .map((u) => ({
-      chain: u.chain,
-      conf: chain ? chain.getConfirmations(u) : undefined,
-      ...(value ? { value: u.value } : {})
-    }))
-    .map((obj) =>
-      `{${Object.entries(obj).map(([k, v]) => `${k}=${v}`).join(',')}}`
-    )
-    .join(',');
+  .map((u) => ({
+    chain: u.chain,
+    conf: chain ? chain.getConfirmations(u) : undefined,
+    ...(value ? { value: u.value } : {})
+  }))
+  .map((obj) =>
+    `{${Object.entries(obj).map(([k, v]) => `${k}=${v}`).join(',')}}`
+  )
+  .join(',');
 
 const runCollectErrors = async <T>(
   items: T[],
   func: (v: T) => Promise<any>
 ): Promise<Error[]> =>
   (
-    await Bluebird.map(items, async (v): Promise<Error | null> => {
+    await Bluebird.map(items, async(v): Promise<Error | null> => {
       try {
         await func(v);
         return null;
@@ -166,7 +166,7 @@ class Timechain {
     public network: any,
   ) { }
 
-  public getMaxSpendable(us: IUnspent[], recipients: string[], feeRate: number) {
+  public getMaxSpendable(us: Unspent[], recipients: string[], feeRate: number) {
     return getMaxSpendable(
       us,
       recipients.map((a) => utxolib.address.toOutputScript(a, this.network)),
@@ -174,7 +174,7 @@ class Timechain {
     );
   }
 
-  public getConfirmations(u: IUnspent) {
+  public getConfirmations(u: Unspent) {
     return Math.max(0, this.chainHead - u.blockHeight + 1);
   }
 
@@ -188,16 +188,15 @@ export class ManagedWallet {
   public constructor(
     public usedWallets: Set<BitGoWallet>,
     public chain: Timechain,
-    public walletConfig: IWalletConfig,
+    public walletConfig: WalletConfig,
     public wallet: BitGoWallet,
-    public unspents: IUnspent[],
-    public addresses: IAddress[]
+    public unspents: Unspent[],
+    public addresses: Address[]
   ) { }
 
-  public getWalletLimits(): IWalletLimits {
+  public getWalletLimits(): WalletLimits {
     const nMinTotal = codeGroups
-      .reduce((sum, codeGroup) => sum + this.walletConfig.getMinUnspents(codeGroup), 0);
-    const nResetTotal = nMinTotal * 2;
+    .reduce((sum, codeGroup) => sum + this.walletConfig.getMinUnspents(codeGroup), 0);
 
     const minUnspentBalance = 0.001e8;
     const maxUnspentBalance = minUnspentBalance * 4;
@@ -205,7 +204,7 @@ export class ManagedWallet {
     return {
       minUnspentBalance,
       maxUnspentBalance,
-      resetUnspentBalance,
+      resetUnspentBalance
     };
   }
 
@@ -237,43 +236,43 @@ export class ManagedWallet {
     return addr;
   }
 
-  private getAllowedUnspents(unspents: IUnspent[]): IUnspent[] {
+  private getAllowedUnspents(unspents: Unspent[]): Unspent[] {
     const valueInRange = (value) =>
       (this.getWalletLimits().minUnspentBalance < value) && (value < this.getWalletLimits().maxUnspentBalance);
 
     return chainGroups
-        .map((grp) =>
-          unspents
-            .filter((u) => grp.has(u.chain) && valueInRange(u.value))
-            .slice(0, this.walletConfig.getMaxUnspents(grp))
-        )
-        .reduce((all, us) => [...all, ...us]);
+    .map((grp) =>
+      unspents
+      .filter((u) => grp.has(u.chain) && valueInRange(u.value))
+      .slice(0, this.walletConfig.getMaxUnspents(grp))
+    )
+    .reduce((all, us) => [...all, ...us]);
   }
 
-  private getExcessUnspents(unspents: IUnspent[]): IUnspent[] {
+  private getExcessUnspents(unspents: Unspent[]): Unspent[] {
     const allowedUnspents = this.getAllowedUnspents(unspents);
     return unspents.filter((u) => !allowedUnspents.includes(u));
   }
 
-  public getRequiredUnspents(unspents: IUnspent[]): [ChainCode, number][] {
+  public getRequiredUnspents(unspents: Unspent[]): [ChainCode, number][] {
     const limits = this.getWalletLimits();
 
     const allowedUnspents = this.getAllowedUnspents(unspents);
 
     return [Codes.p2sh, Codes.p2shP2wsh, Codes.p2wsh]
-      .map((codes: CodesByPurpose): [ChainCode, number] => {
-        const count = allowedUnspents
-          .filter((u) => u.value > limits.minUnspentBalance)
-          .filter((u) => codes.has(u.chain)).length;
-        const resetCount = (min, count) => (count >= min) ? 0 : 2 * min - count;
-        return [codes.external, resetCount(this.walletConfig.getMinUnspents(codes), count)];
-      });
+    .map((codes: CodesByPurpose): [ChainCode, number] => {
+      const count = allowedUnspents
+      .filter((u) => u.value > limits.minUnspentBalance)
+      .filter((u) => codes.has(u.chain)).length;
+      const resetCount = (min, count) => (count >= min) ? 0 : 2 * min - count;
+      return [codes.external, resetCount(this.walletConfig.getMinUnspents(codes), count)];
+    });
   }
 
   public needsReset(): { excessUnspents: boolean, missingUnspents: boolean } | undefined {
     const excessUnspents = this.getExcessUnspents(this.unspents);
     const missingUnspents = this.getRequiredUnspents(this.unspents)
-      .filter(([code, count]) => count > 0);
+    .filter(([code, count]) => count > 0);
 
     const hasExcessUnspents = excessUnspents.length > 0;
     const hasMissingUnspent = missingUnspents.length > 0;
@@ -294,30 +293,30 @@ export class ManagedWallet {
     }
   }
 
-  public async getResetRecipients(us: IUnspent[]): Promise<IRecipient[]> {
+  public async getResetRecipients(us: Unspent[]): Promise<Recipient[]> {
     return (await Promise.all(this.getRequiredUnspents(us)
-      .map(async ([chain, count]) => {
-        if (count <= 0) {
-          return [];
-        }
-        return Promise.all(
-          Array(count).fill(0).map(
-            async () => (await this.getAddress({ chain })).address
-          )
-        );
-      })
+    .map(async([chain, count]) => {
+      if (count <= 0) {
+        return [];
+      }
+      return Promise.all(
+        Array(count).fill(0).map(
+          async() => (await this.getAddress({ chain })).address
+        )
+      );
+    })
     ))
-      .reduce((all, rs) => [...all, ...rs])
-      .map((address) => ({
-        address,
-        amount: this.getWalletLimits().resetUnspentBalance
-      }));
+    .reduce((all, rs) => [...all, ...rs])
+    .map((address) => ({
+      address,
+      amount: this.getWalletLimits().resetUnspentBalance
+    }));
   }
 
   /**
    * List of source-target pairs
    */
-  public async getSends(faucet: ManagedWallet, feeRate: number): Promise<ISend[]> {
+  public async getSends(faucet: ManagedWallet, feeRate: number): Promise<Send[]> {
     if (!this.needsReset()) {
       return [];
     }
@@ -330,7 +329,7 @@ export class ManagedWallet {
       sends.push({
         source: this.wallet,
         unspents: excessUnspents.map((u) => u.id),
-        recipients: [{ address: faucetAddress, amount: refundAmount }],
+        recipients: [{ address: faucetAddress, amount: refundAmount }]
       });
     }
 
@@ -357,13 +356,13 @@ export class ManagedWallet {
   }
 }
 
-type ManagedWalletPredicate = (w: BitGoWallet, us: IUnspent[]) => boolean;
+type ManagedWalletPredicate = (w: BitGoWallet, us: Unspent[]) => boolean;
 
 export class ManagedWallets {
   static async create(
     env: string,
     clientId: string,
-    walletConfig: IWalletConfig,
+    walletConfig: WalletConfig,
     poolSize: number = 32,
     { dryRun = false }: { dryRun?: boolean } = {}
   ): Promise<ManagedWallets> {
@@ -380,7 +379,7 @@ export class ManagedWallets {
       username: clientId,
       walletConfig,
       poolSize,
-      dryRun,
+      dryRun
     })).init();
   }
 
@@ -394,7 +393,7 @@ export class ManagedWallets {
   }
 
   public getPredicateUnspentsConfirmed(confirmations: number): ManagedWalletPredicate {
-    return (w: BitGoWallet, us: IUnspent[]) =>
+    return (w: BitGoWallet, us: Unspent[]) =>
       us.every((u) => this.chain.getConfirmations(u) >= confirmations);
   }
 
@@ -409,9 +408,9 @@ export class ManagedWallets {
   private wallets: Promise<BitGoWallet[]>;
   private usedWallets: Set<BitGoWallet> = new Set();
   private faucet: BitGoWallet;
-  private walletUnspents: Map<BitGoWallet, Promise<IUnspent[]>> = new Map();
-  private walletAddresses: Map<BitGoWallet, Promise<IAddress[]>> = new Map();
-  private walletConfig: IWalletConfig;
+  private walletUnspents: Map<BitGoWallet, Promise<Unspent[]>> = new Map();
+  private walletAddresses: Map<BitGoWallet, Promise<Address[]>> = new Map();
+  private walletConfig: WalletConfig;
   private poolSize: number;
   private labelPrefix: string;
   private dryRun: boolean;
@@ -426,11 +425,11 @@ export class ManagedWallets {
       username,
       walletConfig,
       poolSize,
-      dryRun,
+      dryRun
     }: {
       env: string,
       username: string,
-      walletConfig: IWalletConfig,
+      walletConfig: WalletConfig,
       poolSize: number,
       dryRun: boolean,
   }) {
@@ -452,7 +451,7 @@ export class ManagedWallets {
 
     if ('after' in global) {
       const mw = this;
-      after(async function () {
+      after(async function() {
         this.timeout(600_000);
         debug('resetWallets() start');
         await mw.resetWallets();
@@ -489,7 +488,7 @@ export class ManagedWallets {
     const response = await this.bitgo.authenticate({
       username: this.username,
       password: this.password,
-      otp: ManagedWallets.testUserOTP(),
+      otp: ManagedWallets.testUserOTP()
     });
 
     if (!response['access_token']) {
@@ -503,7 +502,7 @@ export class ManagedWallets {
 
     this.faucet = await this.getOrCreateWallet('managed-faucet');
 
-    this.wallets = (async () => await Bluebird.map(
+    this.wallets = (async() => await Bluebird.map(
       Array(this.poolSize).fill(null).map((v, i) => i),
       (i) => this.getOrCreateWallet(this.getLabelForIndex(i)),
       { concurrency: 4 }
@@ -527,12 +526,12 @@ export class ManagedWallets {
     return allWallets;
   }
 
-  public async getAddresses(w: BitGoWallet, { cache = true }: { cache?: boolean } = {}): Promise<IAddress[]> {
+  public async getAddresses(w: BitGoWallet, { cache = true }: { cache?: boolean } = {}): Promise<Address[]> {
     if (!this.walletAddresses.has(w) || !cache) {
-      this.walletAddresses.set(w, (async (): Promise<IAddress[]> =>
+      this.walletAddresses.set(w, (async(): Promise<Address[]> =>
         (await Bluebird.map(
           chainGroups,
-          async (group) => (await w.addresses({ limit: 100, chains: group.values })).addresses,
+          async(group) => (await w.addresses({ limit: 100, chains: group.values })).addresses,
           { concurrency: 2 }
         )).reduce((all, addrs) => [...all, ...addrs])
       )());
@@ -540,9 +539,9 @@ export class ManagedWallets {
     return this.walletAddresses.get(w);
   }
 
-  public async getUnspents(w: BitGoWallet, { cache = true }: { cache?: boolean } = {}): Promise<IUnspent[]> {
+  public async getUnspents(w: BitGoWallet, { cache = true }: { cache?: boolean } = {}): Promise<Unspent[]> {
     if (!this.walletUnspents.has(w) || !cache) {
-      this.walletUnspents.set(w, ((async () => (await w.unspents()).unspents))());
+      this.walletUnspents.set(w, ((async() => (await w.unspents()).unspents))());
     }
     return this.walletUnspents.get(w);
   }
@@ -555,7 +554,7 @@ export class ManagedWallets {
    */
   private async getOrCreateWallet(label: string): Promise<BitGoWallet> {
     const walletsWithLabel = this.walletList
-      .filter(w => w.label() === label);
+    .filter(w => w.label() === label);
     if (walletsWithLabel.length < 1) {
       debug(`no wallet with label ${label} - creating new wallet...`);
       if (this.dryRun) {
@@ -563,7 +562,7 @@ export class ManagedWallets {
       }
       const { wallet } = await this.basecoin.wallets().generateWallet({
         label,
-        passphrase: ManagedWallets.getPassphrase(),
+        passphrase: ManagedWallets.getPassphrase()
       });
       this.walletUnspents.set(wallet, Promise.resolve([]));
       return wallet;
@@ -582,7 +581,7 @@ export class ManagedWallets {
   public async getAll(): Promise<ManagedWallet[]> {
     return Bluebird.map(
       (await this.wallets),
-      async (w) => new ManagedWallet(
+      async(w) => new ManagedWallet(
         this.usedWallets,
         this.chain,
         this.walletConfig,
@@ -646,7 +645,7 @@ export class ManagedWallets {
         + `nNeedsReset=${stats.nNeedsReset},`
         + `nNotReady=${stats.nNotReady},`
         + `predicate=${predicate}`
-        +`)`
+        + `)`
       );
     }
 
@@ -659,12 +658,12 @@ export class ManagedWallets {
   async removeAllWallets() {
     const faucetAddress = this.faucet.receiveAddress();
     const wallets = this.walletList
-      .filter((thinWallet) => thinWallet.id() !== this.faucet.id())
-      .map((thinWallet) => this.basecoin.wallets().get({ id: thinWallet.id() }));
+    .filter((thinWallet) => thinWallet.id() !== this.faucet.id())
+    .map((thinWallet) => this.basecoin.wallets().get({ id: thinWallet.id() }));
 
     const walletUnspents = await Bluebird.map(
       wallets,
-      async (w) => (await w.unspents()).unspents,
+      async(w) => (await w.unspents()).unspents,
       { concurrency: concurrencyBitGoApi }
     );
 
@@ -701,7 +700,7 @@ export class ManagedWallets {
     // refresh unspents of used wallets
     for (const mw of await this.getAll()) {
       if (mw.isUsed()) {
-        this.getUnspents(mw.wallet, {cache: false});
+        this.getUnspents(mw.wallet, { cache: false });
       }
     }
 
@@ -721,9 +720,9 @@ export class ManagedWallets {
 
     const feeRate = 10_000;
     const sends = await Promise.all(managedWallets.map((m) => m.getSends(managedFaucet, feeRate)));
-    const sendsByWallet: Map<BitGoWallet, ISend[]> = sends
-      .reduce((all, sends) => [...all, ...sends], [])
-      .reduce((map, send: ISend) => {
+    const sendsByWallet: Map<BitGoWallet, Send[]> = sends
+    .reduce((all, sends) => [...all, ...sends], [])
+    .reduce((map, send: Send) => {
       const sds = map.get(send.source) || [];
       map.set(send.source, [...sds, send]);
       return map;
@@ -738,9 +737,9 @@ export class ManagedWallets {
 
     await runCollectErrors(
       [...sendsByWallet.entries()],
-      async ([w, sends]) => {
+      async([w, sends]) => {
         if (sends.length === 0) {
-          throw new Error(`no sends for ${w}`)
+          throw new Error(`no sends for ${w}`);
         }
 
         let unspents;
@@ -753,7 +752,7 @@ export class ManagedWallets {
         }
 
         const recipients =
-          sends.reduce((rs, s: ISend) => [...rs, ...s.recipients], []);
+          sends.reduce((rs, s: Send) => [...rs, ...s.recipients], []);
 
         const sum = recipients.reduce((sum, v) => sum + v.amount, 0);
         if (sum > w.spendableBalance()) {
@@ -771,14 +770,14 @@ export class ManagedWallets {
           feeRate,
           unspents,
           recipients,
-          walletPassphrase: ManagedWallets.getPassphrase(),
+          walletPassphrase: ManagedWallets.getPassphrase()
         });
       }
     );
   }
 }
 
-export const makeConfigSingleGroup = (name: string, allowedGroups: CodeGroup[]): IWalletConfig => ({
+export const makeConfigSingleGroup = (name: string, allowedGroups: CodeGroup[]): WalletConfig => ({
   name,
 
   getMinUnspents(c: CodeGroup): number {
@@ -793,7 +792,7 @@ export const GroupPureP2sh = makeConfigSingleGroup('pure-p2sh', [Codes.p2sh]);
 export const GroupPureP2shP2wsh = makeConfigSingleGroup('pure-p2shP2wsh', [Codes.p2shP2wsh]);
 export const GroupPureP2wsh = makeConfigSingleGroup('pure-p2wsh', [Codes.p2wsh]);
 
-const main = async () => {
+const main = async() => {
   // debugLib.enable('ManagedWallets,bitgo:*,superagent:*');
   debugLib.enable('ManagedWallets');
 
@@ -808,7 +807,7 @@ const main = async () => {
   parser.addArgument(['--reset'], { nargs: 0 });
   const { env, poolSize, group: groupName, cleanup, reset, dryRun } = parser.parseArgs();
   const walletConfig = [GroupPureP2sh, GroupPureP2shP2wsh, GroupPureP2wsh]
-    .find(({ name }) => name === groupName);
+  .find(({ name }) => name === groupName);
   if (!walletConfig) {
     throw new Error(`no walletConfig with name ${groupName}`);
   }
@@ -840,8 +839,8 @@ process.addListener('unhandledRejection', (e) => {
 
 if (require.main === module) {
   main()
-    .catch((e) => {
-      console.error(e);
-      process.abort();
-    });
+  .catch((e) => {
+    console.error(e);
+    process.abort();
+  });
 }
