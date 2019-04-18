@@ -3,24 +3,21 @@
 //
 
 import {
-  CodeGroup,
   GroupPureP2sh,
-  GroupPureP2shP2wsh, GroupPureP2wsh,
+  GroupPureP2shP2wsh,
+  GroupPureP2wsh,
   IWalletConfig,
-  ManagedWallets,
-  sumUnspents
-} from "./ManagedWallets";
+  ManagedWallets
+} from './ManagedWallets';
 
 import 'should';
 
 import * as Bluebird from 'bluebird';
 
 import debugLib from 'debug';
-import {Codes, Dimensions, VirtualSizes} from "@bitgo/unspents";
-import * as utxolib from 'bitgo-utxo-lib';
 const debug = debugLib('integration-test-wallet-unspents');
 
-const wait = async (seconds) => {
+const wait = async(seconds) => {
   debug(`waiting ${seconds} seconds...`);
   await Bluebird.delay(seconds * 1000);
   debug(`done`);
@@ -37,13 +34,13 @@ const runTests = (walletConfig: IWalletConfig) => {
   let testWallets: ManagedWallets;
 
   const env = process.env.BITGO_ENV || 'test';
-  describe(`Wallets env=${env} group=${walletConfig.name}`, function () {
+  describe(`Wallets env=${env} group=${walletConfig.name}`, function() {
     if (skipTest(walletConfig.name)) {
       console.log(`skipping ${walletConfig.name}`);
       return;
     }
 
-    before(async function () {
+    before(async function() {
       this.timeout(120_000);
       testWallets = await ManagedWallets.create(
         env,
@@ -52,7 +49,7 @@ const runTests = (walletConfig: IWalletConfig) => {
       );
     });
 
-    it('should self-send to new default receive addr', async function () {
+    it('should self-send to new default receive addr', async function() {
       this.timeout(60_000);
       const wallet = await testWallets.getNextWallet();
       const unspents = await testWallets.getUnspents(wallet);
@@ -66,7 +63,7 @@ const runTests = (walletConfig: IWalletConfig) => {
       });
     });
 
-    it('should consolidate the number of unspents to 2', async function () {
+    it('should consolidate the number of unspents to 2', async function() {
       this.timeout(60_000);
 
       const wallet = await testWallets.getNextWallet((w, unspents) => unspents.length >= 4);
@@ -83,7 +80,7 @@ const runTests = (walletConfig: IWalletConfig) => {
       (await wallet.unspents({ limit: 100 })).unspents.length.should.eql(2);
     });
 
-    it('should fanout the number of unspents to 20', async function () {
+    it('should fanout the number of unspents to 20', async function() {
       this.timeout(60_000);
 
       const wallet = await testWallets.getNextWallet();
@@ -104,7 +101,7 @@ const runTests = (walletConfig: IWalletConfig) => {
       unspents.length.should.equal(20);
     });
 
-    it('should sweep funds from one wallet to another', async function () {
+    it('should sweep funds from one wallet to another', async function() {
       this.timeout(60_000);
       const sweepWallet = await testWallets.getNextWallet(testWallets.getPredicateUnspentsConfirmed(6));
       const targetWallet = await testWallets.getNextWallet();
@@ -122,7 +119,7 @@ const runTests = (walletConfig: IWalletConfig) => {
       (await targetWallet.unspents()).unspents.length.should.eql(targetWalletUnspents.length + 1);
     });
 
-    it('should make tx with bnb exactMatch', async function () {
+    it('should make tx with bnb exactMatch', async function() {
       this.timeout(60_000);
       const wallet = await testWallets.getNextWallet();
       const unspents = await testWallets.getUnspents(wallet);
