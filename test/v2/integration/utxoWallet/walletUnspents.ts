@@ -2,12 +2,15 @@
 // Tests for Wallets
 //
 
+import * as assert from 'assert';
+
 import {
   GroupPureP2sh,
   GroupPureP2shP2wsh,
   GroupPureP2wsh,
   WalletConfig,
-  ManagedWallets
+  ManagedWallets,
+  sumUnspents
 } from './ManagedWallets';
 
 import 'should';
@@ -15,6 +18,7 @@ import 'should';
 import * as Bluebird from 'bluebird';
 
 import debugLib from 'debug';
+import { TestFunction, ExclusiveTestFunction } from 'mocha';
 const debug = debugLib('integration-test-wallet-unspents');
 
 const wait = async(seconds) => {
@@ -26,8 +30,12 @@ const wait = async(seconds) => {
 const walletPassphrase = ManagedWallets.getPassphrase();
 
 const walletTests = [];
-const walletTest = function(title, callback) {
-  walletTests.push([title, callback]);
+const walletTest = function(title, callback, testFunc: TestFunction | ExclusiveTestFunction = it) {
+  walletTests.push([testFunc, title, callback]);
+};
+
+walletTest.only = function(title, callback) {
+  walletTest(title, callback, it.only);
 };
 
 walletTest('should self-send to new default receive addr', async function(testWallets) {
@@ -115,6 +123,66 @@ walletTest('should make tx with bnb exactMatch', async function(testWallets) {
   (prebuild === undefined).should.be.false();
 });
 
+walletTest('accelerateTx should succeed', async function(testWallets) {
+  const wallet = await testWallets.getNextWallet();
+  const unspents = await testWallets.getUnspents(wallet);
+  const feeRate = 2_000;
+  const cpfpFeeRate = 40_000;
+  const maxFee = 1e8;
+  const address = wallet.receiveAddress();
+  const maxSpendable = testWallets.chain.getMaxSpendable(unspents, [address], feeRate);
+  const amount = (maxSpendable / 2) | 0;
+  const { tx: parentTxHex, txid: parentTxid } = await wallet.sendMany({
+    feeRate,
+    recipients: [{ address, amount }],
+    walletPassphrase: ManagedWallets.getPassphrase()
+  });
+
+  const getInputId = ({ hash, index }) =>
+    `${Buffer.from(hash).reverse().toString('hex')}:${index}`;
+
+  const getMinerFee = (unspents, { ins, outs }) =>
+    sumUnspents(
+      ins
+      .map(getInputId)
+      .map(inputId => unspents.find(u => u.id === inputId)
+        || assert.fail(`no unspent found for ${inputId} unspents=${unspents.join(',')}`))
+    ) - outs.map(o => o.value).reduce((a, b) => a + b);
+
+  const parentTx = testWallets.chain.parseTx(parentTxHex);
+  const parentFee = getMinerFee(unspents, parentTx);
+  const parentVSize = parentTx.virtualSize();
+  console.log({ parentFee });
+
+  await wait(10);
+
+  const childUnspents = await testWallets.getUnspents(wallet, { cache: false });
+  const { tx: childTxHex } = await wallet.accelerateTransaction({
+    cpfpTxIds: [parentTxid],
+    cpfpFeeRate,
+    maxFee,
+    walletPassphrase
+  });
+  const childTx = testWallets.chain.parseTx(childTxHex);
+  const childFee = getMinerFee(childUnspents, childTx);
+  const childVSize = childTx.virtualSize();
+
+  const totalFee = parentFee + childFee;
+  const totalVSize = parentVSize + childVSize;
+  const totalFeeRate = (totalFee / totalVSize) * 1000;
+
+  console.log({
+    parentFee,
+    parentVSize,
+    childFee,
+    childVSize,
+    totalFee,
+    totalVSize,
+    cpfpFeeRate,
+    totalFeeRate
+  });
+});
+
 
 const runTests = (walletConfig: WalletConfig) => {
   let testWallets: ManagedWallets;
@@ -136,12 +204,12 @@ const runTests = (walletConfig: WalletConfig) => {
       testWallets = await ManagedWallets.create(
         env,
         'otto+e2e-utxowallets@bitgo.com',
-        walletConfig,
+        walletConfig
       );
     });
 
-    walletTests.forEach(([title, callback]) => {
-      it(title, async function() {
+    walletTests.forEach(([testFunc, title, callback]) => {
+      testFunc(title, async function() {
         this.timeout(120_000);
         await callback(testWallets);
       });
