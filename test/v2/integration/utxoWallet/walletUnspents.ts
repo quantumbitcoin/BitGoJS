@@ -85,7 +85,7 @@ const runTests = (walletConfig: WalletConfig) => {
 
       const wallet = await testWallets.getNextWallet();
       // it sometimes complains with high feeRates
-      const feeRate = 1000;
+      const feeRate = 1200;
       const transaction = await wallet.fanoutUnspents({
         feeRate,
         minHeight: 1,
