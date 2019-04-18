@@ -109,8 +109,6 @@ export interface Send {
   recipients: Recipient[];
 }
 
-const codeGroups = [Codes.p2sh, Codes.p2shP2wsh, Codes.p2wsh];
-
 const getDimensions = (unspents: Unspent[], outputScripts: Buffer[]): IDimensions =>
   Dimensions.fromUnspents(unspents)
   .plus(Dimensions.sum(
