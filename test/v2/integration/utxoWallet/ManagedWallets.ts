@@ -195,9 +195,6 @@ export class ManagedWallet {
   ) { }
 
   public getWalletLimits(): WalletLimits {
-    const nMinTotal = codeGroups
-    .reduce((sum, codeGroup) => sum + this.walletConfig.getMinUnspents(codeGroup), 0);
-
     const minUnspentBalance = 0.001e8;
     const maxUnspentBalance = minUnspentBalance * 4;
     const resetUnspentBalance = minUnspentBalance * 2;
